@@ -4,6 +4,7 @@ from typing import Any
 
 from src.agents.base import BaseAgent
 from src.core.database import db
+from src.broker.virtual_broker import broker
 
 
 SYSTEM_PROMPT = """Ты — профессиональный трейдер виртуальной инвестиционной компании.
