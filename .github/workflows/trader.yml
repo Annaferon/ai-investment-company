@@ -1,0 +1,33 @@
+name: Run Trader
+
+on:
+  # Расписание: 15:30 UTC = 18:30 МСК, каждый день
+  schedule:
+    - cron: '30 15 * * *'
+  
+  # Ручной запуск через кнопку в GitHub
+  workflow_dispatch:
+
+jobs:
+  run-trader:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+      
+      - name: Run Trader
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python main.py
