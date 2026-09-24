@@ -8,7 +8,7 @@ from src.broker.virtual_broker import broker
 
 
 SYSTEM_PROMPT = """Ты — профессиональный трейдер виртуальной инвестиционной компании.
-Твоя задача: на основе рыночных цен и текущего портфеля предложить ОДНО действие.
+Твоя задача: на основе рыночных цен, текущего портфеля и НОВОСТНОГО ФОНА предложить ОДНО действие.
 
 Правила:
 - Активы: акции РФ (MOEX), криптовалюты (Binance), драгметаллы.
@@ -16,6 +16,8 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 - Комиссия брокера: 0.05% от сделки.
 - Не рискуй более 20% капитала в одной сделке.
 - Если не уверен — выбирай HOLD.
+- Учитывай новостной фон: если sentiment негативный — будь осторожнее с покупками.
+- Если новостей нет — работай только по техническим данным.
 
 Отвечай СТРОГО в формате JSON, без пояснений:
 {
@@ -39,7 +41,7 @@ class Trader(BaseAgent):
     # ---------- Получение данных ----------
 
     def get_market_prices(self) -> dict[str, float]:
-        """Получить текущие цены активов (пока заглушка)."""
+        """Текущие цены активов (пока заглушка)."""
         return {
             "SBER": 285.50,
             "GAZP": 132.40,
@@ -57,13 +59,34 @@ class Trader(BaseAgent):
         row = db.fetch_one("SELECT cash FROM account WHERE id = 1;")
         return float(row["cash"]) if row else 0.0
 
+    def get_latest_news(self) -> dict[str, Any] | None:
+        """Последний новостной отчёт от News Analyst."""
+        return db.fetch_one(
+            """SELECT summary, sentiment, key_events, confidence, created_at
+               FROM news_reports
+               ORDER BY created_at DESC
+               LIMIT 1;"""
+        )
+
     # ---------- Принятие решения ----------
 
     def decide(self) -> dict[str, Any]:
-        """Спросить LLM, что делать (с fallback)."""
+        """Спросить LLM, что делать (с учётом новостей)."""
         prices = self.get_market_prices()
         portfolio = self.get_portfolio()
         cash = self.get_cash()
+        news = self.get_latest_news()
+
+        # Формируем блок новостей
+        if news:
+            news_block = f"""НОВОСТНОЙ ФОН (от {news['created_at']}):
+Sentiment: {news['sentiment']}
+Краткий вывод: {news['summary']}
+Ключевые события:
+{news['key_events']}
+Уверенность News Analyst: {news['confidence']}"""
+        else:
+            news_block = "НОВОСТНОЙ ФОН: пока нет данных (News Analyst не запускался)."
 
         prompt = f"""Текущие цены:
 {json.dumps(prices, ensure_ascii=False, indent=2)}
@@ -72,6 +95,8 @@ class Trader(BaseAgent):
 {json.dumps(portfolio, ensure_ascii=False, indent=2) if portfolio else "пусто"}
 
 Свободные деньги: {cash:.2f} ₽
+
+{news_block}
 
 Что делаем?"""
 
