@@ -104,7 +104,38 @@ class Trader(BaseAgent):
     # ---------- Основной цикл ----------
     
     def run(self) -> dict[str, Any]:
-        """Один цикл работы Trader."""
+    """Один цикл работы Trader."""
+    self.log.info("Trader просыпается...")
+
+    try:
+        decision = self.decide()
+    except Exception as e:
+        self.log.error(f"Не смог принять решение: {e}")
+        return {"error": str(e)}
+
+    # Подставляем цену из рынка (её LLM не знает точно)
+    prices = self.get_market_prices()
+    ticker = decision.get("ticker", "?").upper()
+    decision["price"] = prices.get(ticker, 0)
+
+    # Записываем решение в БД
+    self.record_decision(
+        ticker=ticker,
+        action=decision.get("action", "HOLD"),
+        confidence=float(decision.get("confidence", 0.0)),
+        reasoning=decision.get("reasoning", ""),
+    )
+
+    self.log.info(
+        f"Решение: {decision.get('action')} {ticker} "
+        f"(уверенность {decision.get('confidence')})"
+    )
+
+    # Исполняем решение через брокера
+    execution = broker.execute(decision)
+    self.log.info(f"Брокер: {execution}")
+
+    return {**decision, "execution": execution}
         self.log.info("Trader просыпается...")
         
         try:
