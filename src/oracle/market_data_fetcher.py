@@ -10,9 +10,11 @@ log = get_logger("oracle")
 
 # --- MOEX ---
 MOEX_BASE = "https://iss.moex.com/iss"
-MOEX_TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "ROSN", "NVTK", "TATN", "SNGS", "PLZL", "MTSS"]
+# Bulk-эндпоинт: сразу все бумаги с одного борда
+MOEX_BULK_URL = f"{MOEX_BASE}/engines/stock/markets/shares/boards/TQBR/securities.json"
+MOEX_TICKERS = {"SBER", "GAZP", "LKOH", "GMKN", "ROSN", "NVTK", "TATN", "SNGS", "PLZL", "MTSS"}
 
-# --- CoinGecko (крипта) ---
+# --- CoinGecko ---
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 CRYPTO_IDS = {
     "BTC": "bitcoin",
@@ -21,14 +23,14 @@ CRYPTO_IDS = {
     "BNB": "binancecoin",
 }
 
-MAX_RETRIES = 3
-RETRY_DELAY_SEC = 5
-# Не повторяем при этих кодах (это не временные ошибки)
+MAX_RETRIES = 2
+RETRY_DELAY_SEC = 3
+TIMEOUT_SEC = 8
 FATAL_CODES = {400, 401, 403, 404, 451}
 
 
 def _retry(func, *args, **kwargs):
-    """Retry только для временных ошибок."""
+    """Retry только для временных ошибок. Fail-fast при таймаутах."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             result = func(*args, **kwargs)
@@ -40,7 +42,11 @@ def _retry(func, *args, **kwargs):
             if code in FATAL_CODES:
                 log.error(f"Fatal {code} — не повторяем")
                 return None
-            log.warning(f"Попытка {attempt}/{MAX_RETRIES} ошибка: {e}")
+            log.warning(f"Попытка {attempt}/{MAX_RETRIES} HTTP {code}")
+        except requests.Timeout:
+            # Не повторяем при таймауте — источник скорее всего заблокирован
+            log.warning(f"Таймаут (попытка {attempt}/{MAX_RETRIES}) — прерываем")
+            return None
         except Exception as e:
             log.warning(f"Попытка {attempt}/{MAX_RETRIES} ошибка: {e}")
 
@@ -49,46 +55,63 @@ def _retry(func, *args, **kwargs):
     return None
 
 
-# --- MOEX ---
+# --- MOEX (bulk) ---
 
-def fetch_moex_price(ticker: str) -> Optional[float]:
-    url = f"{MOEX_BASE}/engines/stock/markets/shares/boards/TQBR/securities/{ticker}.json"
-    r = requests.get(url, params={"iss.meta": "off"}, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    cols = data["marketdata"]["columns"]
-    rows = data["marketdata"]["data"]
-    if not rows:
-        return None
-    idx = cols.index("LAST") if "LAST" in cols else cols.index("LCURRENTPRICE")
-    for row in rows:
-        if row[idx] is not None:
-            return float(row[idx])
-    return None
+def fetch_moex_bulk() -> dict[str, float]:
+    """Один запрос — цены всех нужных бумаг MOEX."""
+    try:
+        r = requests.get(
+            MOEX_BULK_URL,
+            params={"iss.meta": "off", "iss.only": "marketdata,securities"},
+            timeout=TIMEOUT_SEC,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except requests.Timeout:
+        log.error("MOEX: таймаут — источник недоступен из этой сети")
+        return {}
+    except Exception as e:
+        log.error(f"MOEX ошибка: {e}")
+        return {}
 
+    # Парсим блок marketdata
+    cols = data.get("marketdata", {}).get("columns", [])
+    rows = data.get("marketdata", {}).get("data", [])
+    if not cols or not rows:
+        log.error("MOEX: пустой ответ")
+        return {}
 
-def fetch_all_moex() -> dict[str, float]:
+    # Индексы нужных полей
+    try:
+        idx_secid = cols.index("SECID")
+        idx_last = cols.index("LAST") if "LAST" in cols else cols.index("LCURRENTPRICE")
+    except ValueError as e:
+        log.error(f"MOEX: не нашли нужные колонки: {e}")
+        return {}
+
     prices = {}
-    for ticker in MOEX_TICKERS:
-        price = _retry(fetch_moex_price, ticker)
-        if price:
-            prices[ticker] = price
-        else:
-            log.error(f"MOEX {ticker}: не получили цену")
+    for row in rows:
+        ticker = row[idx_secid]
+        if ticker not in MOEX_TICKERS:
+            continue
+        price = row[idx_last]
+        if price is not None:
+            prices[ticker] = float(price)
+
+    log.info(f"MOEX: получено {len(prices)} цен из {len(MOEX_TICKERS)} нужных")
     return prices
 
 
-# --- CoinGecko (крипта в USD) ---
+# --- CoinGecko ---
 
 def fetch_coingecko_prices() -> dict[str, float]:
-    """Получить цены крипты одним запросом (CoinGecko)."""
     ids = ",".join(CRYPTO_IDS.values())
     url = f"{COINGECKO_BASE}/simple/price"
     try:
         r = requests.get(
             url,
             params={"ids": ids, "vs_currencies": "usd"},
-            timeout=15,
+            timeout=TIMEOUT_SEC + 2,
         )
         r.raise_for_status()
         data = r.json()
@@ -107,8 +130,8 @@ def fetch_coingecko_prices() -> dict[str, float]:
 # --- ЦБ РФ (металлы) ---
 
 def fetch_cbr_metals() -> dict[str, float]:
-    """Цены драгметаллов с ЦБ РФ."""
-    # TODO: подключить реальный XML-парсинг cbr.ru
+    """Цены драгметаллов с ЦБ РФ. TODO: заменить на реальный XML."""
+    # ЦБ РФ тоже может блокировать US IP, поэтому обернём в try на будущее
     return {"GOLD": 7500.0, "SILVER": 95.0}
 
 
@@ -132,7 +155,7 @@ def save_prices_to_db(prices: dict[str, float], asset_type: str, source: str) ->
 def run_oracle() -> dict[str, Any]:
     log.info("Оракул просыпается...")
 
-    moex_prices = fetch_all_moex()
+    moex_prices = fetch_moex_bulk()
     crypto_prices = fetch_coingecko_prices()
     metals_prices = fetch_cbr_metals()
 
