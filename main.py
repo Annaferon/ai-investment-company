@@ -9,7 +9,7 @@ from src.agents.trader import Trader
 
 def ensure_account() -> None:
     """Если таблица account пуста — заводим стартовый капитал."""
-    row = db.fetch_one("SELECT id FROM account WHERE id = 1;")
+    row = db.fetch_one("SELECT id FROM account LIMIT 1;")
     if not row:
         logger.info(f"Создаём счёт с капиталом {config.STARTING_CAPITAL} ₽")
         db.execute(
