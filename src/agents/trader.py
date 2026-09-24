@@ -89,10 +89,10 @@ Sentiment: {news['sentiment']}
             news_block = "НОВОСТНОЙ ФОН: пока нет данных (News Analyst не запускался)."
 
         prompt = f"""Текущие цены:
-{json.dumps(prices, ensure_ascii=False, indent=2)}
+{json.dumps(prices, ensure_ascii=False, indent=2, default=float)}
 
 Текущий портфель:
-{json.dumps(portfolio, ensure_ascii=False, indent=2) if portfolio else "пусто"}
+{json.dumps(portfolio, ensure_ascii=False, indent=2, default=float) if portfolio else "пусто"}
 
 Свободные деньги: {cash:.2f} ₽
 
