@@ -1,5 +1,6 @@
 """Запуск Оракула."""
 import sys
+
 from src.core.config import config
 from src.core.database import db
 from src.core.logger import logger
@@ -21,7 +22,11 @@ def main() -> int:
         logger.error("Нет связи с Supabase")
         return 1
 
-    result = run_oracle()
+    try:
+        result = run_oracle()
+    except Exception as e:
+        logger.error(f"Оракул упал: {e}")
+        return 1
 
     logger.info("=" * 60)
     logger.info(f"Результат: {result}")
