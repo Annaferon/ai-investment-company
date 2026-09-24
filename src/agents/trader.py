@@ -1,5 +1,6 @@
 """Trader-01 — первый агент компании. Принимает торговые решения."""
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 from src.agents.base import BaseAgent
@@ -29,6 +30,9 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 }
 """
 
+# Сколько часов считаем данные «свежими»
+MAX_DATA_AGE_HOURS = 6
+
 
 class Trader(BaseAgent):
     """Первый сотрудник компании."""
@@ -41,18 +45,24 @@ class Trader(BaseAgent):
     # ---------- Получение данных ----------
 
     def get_market_prices(self) -> dict[str, float]:
-    """Получить свежие цены из таблицы market_prices (от Оракула)."""
-    rows = db.fetch_all(
-        """SELECT DISTINCT ON (ticker) ticker, price
-           FROM market_prices
-           ORDER BY ticker, updated_at DESC;"""
-    )
-    if not rows:
-        self.log.warning("Нет данных от Оракула — используем заглушки")
-        return {"SBER": 285.50, "GAZP": 132.40}
-    prices = {r["ticker"]: float(r["price"]) for r in rows}
-    self.log.info(f"Получено {len(prices)} цен от Оракула")
-    return prices
+        """Свежие цены от Оракула. Если данных нет — возвращаем пустой dict."""
+        cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
+        rows = db.fetch_all(
+            """SELECT DISTINCT ON (ticker) ticker, price, updated_at
+               FROM market_prices
+               WHERE updated_at >= %s
+               ORDER BY ticker, updated_at DESC;""",
+            (cutoff,),
+        )
+        if not rows:
+            self.log.error(
+                f"Нет свежих цен от Оракула (старше {MAX_DATA_AGE_HOURS}ч). "
+                f"Работа невозможна."
+            )
+            return {}
+        prices = {r["ticker"]: float(r["price"]) for r in rows}
+        self.log.info(f"Получено {len(prices)} свежих цен от Оракула")
+        return prices
 
     def get_portfolio(self) -> list[dict[str, Any]]:
         """Что сейчас в портфеле."""
@@ -75,13 +85,17 @@ class Trader(BaseAgent):
     # ---------- Принятие решения ----------
 
     def decide(self) -> dict[str, Any]:
-        """Спросить LLM, что делать (с учётом новостей)."""
+        """Спросить LLM, что делать. Требует свежих цен от Оракула."""
         prices = self.get_market_prices()
+        if not prices:
+            raise RuntimeError(
+                "Нет свежих рыночных данных. Trader не может принять решение."
+            )
+
         portfolio = self.get_portfolio()
         cash = self.get_cash()
         news = self.get_latest_news()
 
-        # Формируем блок новостей
         if news:
             news_block = f"""НОВОСТНОЙ ФОН (от {news['created_at']}):
 Sentiment: {news['sentiment']}
@@ -90,9 +104,9 @@ Sentiment: {news['sentiment']}
 {news['key_events']}
 Уверенность News Analyst: {news['confidence']}"""
         else:
-            news_block = "НОВОСТНОЙ ФОН: пока нет данных (News Analyst не запускался)."
+            news_block = "НОВОСТНОЙ ФОН: нет данных."
 
-        prompt = f"""Текущие цены:
+        prompt = f"""Текущие цены (реальные, от Оракула):
 {json.dumps(prices, ensure_ascii=False, indent=2, default=float)}
 
 Текущий портфель:
@@ -154,12 +168,15 @@ Sentiment: {news['sentiment']}
             self.log.error(f"Не смог принять решение: {e}")
             return {"error": str(e)}
 
-        # Подставляем цену из рынка
+        # Подставляем цену из свежих данных
         prices = self.get_market_prices()
         ticker = decision.get("ticker", "?").upper()
         decision["price"] = prices.get(ticker, 0)
 
-        # Записываем решение в БД
+        if decision["price"] <= 0:
+            self.log.warning(f"Нет цены для {ticker} — сделку не исполняем")
+            return {"error": f"no_price_for_{ticker}", "decision": decision}
+
         self.record_decision(
             ticker=ticker,
             action=decision.get("action", "HOLD"),
@@ -172,7 +189,6 @@ Sentiment: {news['sentiment']}
             f"(уверенность {decision.get('confidence')})"
         )
 
-        # Исполняем через брокера
         execution = broker.execute(decision)
         self.log.info(f"Брокер: {execution}")
 
