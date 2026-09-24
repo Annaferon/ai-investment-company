@@ -31,7 +31,7 @@ class Trader(BaseAgent):
     """Первый сотрудник компании."""
     
     # Trader использует модель посильнее — ему нужно думать
-    DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
+    DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
   
     def __init__(self, name: str = "Trader-01") -> None:
         super().__init__(name=name, role="trader")
