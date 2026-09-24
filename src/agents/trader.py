@@ -41,14 +41,18 @@ class Trader(BaseAgent):
     # ---------- Получение данных ----------
 
     def get_market_prices(self) -> dict[str, float]:
-        """Текущие цены активов (пока заглушка)."""
-        return {
-            "SBER": 285.50,
-            "GAZP": 132.40,
-            "BTC": 6_200_000.0,
-            "ETH": 210_000.0,
-            "GOLD": 7_500.0,
-        }
+    """Получить свежие цены из таблицы market_prices (от Оракула)."""
+    rows = db.fetch_all(
+        """SELECT DISTINCT ON (ticker) ticker, price
+           FROM market_prices
+           ORDER BY ticker, updated_at DESC;"""
+    )
+    if not rows:
+        self.log.warning("Нет данных от Оракула — используем заглушки")
+        return {"SBER": 285.50, "GAZP": 132.40}
+    prices = {r["ticker"]: float(r["price"]) for r in rows}
+    self.log.info(f"Получено {len(prices)} цен от Оракула")
+    return prices
 
     def get_portfolio(self) -> list[dict[str, Any]]:
         """Что сейчас в портфеле."""
