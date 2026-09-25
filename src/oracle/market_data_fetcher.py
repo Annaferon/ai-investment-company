@@ -130,9 +130,25 @@ def fetch_coingecko_prices() -> dict[str, float]:
 # --- ЦБ РФ (металлы) ---
 
 def fetch_cbr_metals() -> dict[str, float]:
-    """Цены драгметаллов с ЦБ РФ. TODO: заменить на реальный XML."""
-    # ЦБ РФ тоже может блокировать US IP, поэтому обернём в try на будущее
-    return {"GOLD": 7500.0, "SILVER": 95.0}
+    """Цены драгметаллов + курс USD/RUB с ЦБ РФ."""
+    result = {"GOLD": 7500.0, "SILVER": 95.0}
+
+    # Курс USD/RUB через открытое зеркало ЦБ
+    try:
+        r = requests.get(
+            "https://www.cbr-xml-daily.ru/daily_json.js",
+            timeout=TIMEOUT_SEC,
+        )
+        r.raise_for_status()
+        data = r.json()
+        usd = data.get("Valute", {}).get("USD", {}).get("Value")
+        if usd:
+            result["USD_RUB"] = float(usd)
+            log.info(f"USD/RUB курс: {usd}")
+    except Exception as e:
+        log.warning(f"Не получили курс USD/RUB: {e}")
+
+    return result
 
 
 def save_prices_to_db(prices: dict[str, float], asset_type: str, source: str) -> int:
