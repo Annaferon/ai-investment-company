@@ -1,6 +1,6 @@
 """Ежедневный отчёт в Telegram."""
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -11,38 +11,39 @@ log = get_logger("reporter")
 
 TG_API = "https://api.telegram.org/bot{token}/sendMessage"
 
-# Текущие цены (пока заглушка, потом заменим на API)
-MARKET_PRICES = {
-    "SBER": 285.50,
-    "GAZP": 132.40,
-    "BTC": 6_200_000.0,
-    "ETH": 210_000.0,
-    "GOLD": 7_500.0,
-}
-
 
 def get_daily_stats() -> dict:
-    """Собираем статистику: капитал, портфель, сделки, решения."""
+    """Статистика за последние 24 часа."""
     # Окно: последние 24 часа (а не «сегодня»)
-from datetime import timedelta
-today_end = datetime.now()
-today_start = today_end - timedelta(hours=24)
+    period_end = datetime.now()
+    period_start = period_end - timedelta(hours=24)
+
     # --- Кэш из account ---
     acc = db.fetch_one("SELECT cash, initial_capital FROM account WHERE id = 1;")
     cash = float(acc["cash"]) if acc else 0.0
     initial = float(acc["initial_capital"]) if acc else 0.0
 
-    # --- Портфель: считаем стоимость по текущим ценам ---
+    # --- Портфель ---
     positions = db.fetch_all(
         "SELECT ticker, quantity, avg_price FROM portfolio;"
     )
+
+    # Цены из market_prices (последние)
+    price_rows = db.fetch_all(
+        """SELECT DISTINCT ON (ticker) ticker, price
+           FROM market_prices
+           ORDER BY ticker, updated_at DESC;"""
+    )
+    prices = {r["ticker"]: float(r["price"]) for r in price_rows}
+    usd_rub = prices.get("USD_RUB", 90.0)
+
     assets_value = 0.0
     enriched_positions = []
     for p in positions:
         ticker = p["ticker"]
         qty = float(p["quantity"])
         avg = float(p["avg_price"])
-        current = MARKET_PRICES.get(ticker, avg)
+        current = prices.get(ticker, avg)
         value = qty * current
         assets_value += value
         enriched_positions.append({
@@ -53,18 +54,22 @@ today_start = today_end - timedelta(hours=24)
             "value": value,
         })
 
-    # --- Сделки за сегодня ---
+    # --- Сделки за 24 часа ---
     trades = db.fetch_all(
-        "SELECT ticker, action, quantity, price, total, commission FROM trades "
-        "WHERE created_at BETWEEN %s AND %s ORDER BY created_at;",
-        (today_start, today_end),
+        """SELECT ticker, action, quantity, price, total, commission
+           FROM trades
+           WHERE created_at BETWEEN %s AND %s
+           ORDER BY created_at;""",
+        (period_start, period_end),
     )
 
-    # --- Решения за сегодня ---
+    # --- Решения за 24 часа ---
     decisions = db.fetch_all(
-        "SELECT ticker, action, confidence, reasoning FROM decisions "
-        "WHERE created_at BETWEEN %s AND %s ORDER BY created_at;",
-        (today_start, today_end),
+        """SELECT ticker, action, confidence, reasoning
+           FROM decisions
+           WHERE created_at BETWEEN %s AND %s
+           ORDER BY created_at;""",
+        (period_start, period_end),
     )
 
     return {
@@ -80,7 +85,7 @@ today_start = today_end - timedelta(hours=24)
 
 
 def format_report(s: dict) -> str:
-    """Собираем текст отчёта."""
+    """Формируем текст отчёта."""
     pnl_sign = "🟢" if s["pnl"] >= 0 else "🔴"
     lines = [
         "🏦 *AI Investment Company*",
@@ -108,7 +113,7 @@ def format_report(s: dict) -> str:
     lines.append("")
 
     if s["trades"]:
-        lines.append("💼 *СДЕЛКИ ЗА ДЕНЬ*")
+        lines.append("💼 *СДЕЛКИ ЗА 24Ч*")
         for t in s["trades"]:
             lines.append(
                 f"• {t['action']} {t['ticker']} × {t['quantity']} "
@@ -117,7 +122,7 @@ def format_report(s: dict) -> str:
                 f"| комиссия {float(t['commission']):.2f} ₽"
             )
     else:
-        lines.append("💼 Сделок сегодня не было")
+        lines.append("💼 Сделок за 24ч не было")
     lines.append("")
 
     if s["decisions"]:
@@ -130,13 +135,13 @@ def format_report(s: dict) -> str:
             if d.get("reasoning"):
                 lines.append(f"  _{d['reasoning'][:150]}_")
     else:
-        lines.append("🧠 Решений сегодня не было")
+        lines.append("🧠 Решений за 24ч не было")
 
     return "\n".join(lines)
 
 
 def send_message(text: str) -> bool:
-    """Отправляем сообщение через Telegram Bot API."""
+    """Отправка в Telegram."""
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -159,12 +164,12 @@ def send_message(text: str) -> bool:
         log.info("Отчёт отправлен в Telegram")
         return True
     except Exception as e:
-        log.error(f"Ошибка отправки в Telegram: {e}")
+        log.error(f"Ошибка отправки: {e}")
         return False
 
 
 def run() -> int:
-    """Точка входа для отчёта."""
+    """Точка входа."""
     log.info("Формируем ежедневный отчёт...")
     stats = get_daily_stats()
     report = format_report(stats)
