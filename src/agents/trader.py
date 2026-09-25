@@ -13,17 +13,17 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 
 Правила:
 - Активы: акции РФ (MOEX), криптовалюты, драгметаллы.
-- Все цены — в рублях (крипта сконвертирована по курсу USD/RUB).
-- Комиссия брокера: 0.05% от сделки.
+- Все цены — в рублях.
+- Комиссия брокера: 0.05%.
 - Не рискуй более 20% капитала в одной сделке.
-- Если не уверен — выбирай HOLD.
-- При негативном новостном фоне — осторожнее с покупками.
-- При bearish-тренде — не покупай. При sideways — умеренно. При bullish — можно активнее.
+- При негативном фоне — осторожнее с покупками.
+- При bearish-тренде — не покупай. Sideways — умеренно. Bullish — можно активнее.
 - При высокой волатильности снижай размер позиции.
+- Если хочешь остаться в деньгах — используй ticker "CASH" и action "HOLD".
 
 Отвечай СТРОГО в формате JSON:
 {
-  "ticker": "SBER",
+  "ticker": "SBER" | "GAZP" | "BTC" | "ETH" | "GOLD" | "CASH",
   "action": "BUY" | "SELL" | "HOLD",
   "quantity": 5,
   "confidence": 0.0-1.0,
@@ -43,7 +43,7 @@ class Trader(BaseAgent):
     # ---------- Получение данных ----------
 
     def get_market_prices(self) -> dict[str, float]:
-        """Свежие цены. Крипта конвертируется в рубли по курсу USD/RUB."""
+        """Свежие цены. Крипта конвертируется в рубли по USD/RUB."""
         cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
         rows = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, price, asset_type
@@ -74,9 +74,7 @@ class Trader(BaseAgent):
             else:
                 prices[ticker] = price
 
-        self.log.info(
-            f"Цен: {len(prices)} | Курс USD/RUB: {usd_rub:.2f}"
-        )
+        self.log.info(f"Цен: {len(prices)} | Курс USD/RUB: {usd_rub:.2f}")
         return prices
 
     def get_portfolio(self) -> list[dict[str, Any]]:
@@ -115,7 +113,6 @@ class Trader(BaseAgent):
             news_block = f"""НОВОСТНОЙ ФОН (от {news['created_at']}):
 Sentiment: {news['sentiment']}
 Вывод: {news['summary']}
-События: {news['key_events']}
 Уверенность: {news['confidence']}"""
         else:
             news_block = "НОВОСТИ: нет данных."
@@ -125,7 +122,6 @@ Sentiment: {news['sentiment']}
 Тренд: {market['overall_trend']}
 Волатильность: {market['volatility_level']}
 Вывод: {market['summary']}
-Key movers: {market['key_movers']}
 Уверенность: {market['confidence']}"""
         else:
             market_block = "РЫНОК: нет данных."
@@ -142,7 +138,7 @@ Key movers: {market['key_movers']}
 
 {market_block}
 
-Что делаем?"""
+Что делаем? Если ничего не покупаем — используй ticker "CASH", action "HOLD"."""
 
         fallback_models = [
             "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -193,26 +189,36 @@ Key movers: {market['key_movers']}
             self.log.error(f"Не смог принять решение: {e}")
             return {"error": str(e)}
 
-        prices = self.get_market_prices()
-        ticker = decision.get("ticker", "?").upper()
-        decision["price"] = prices.get(ticker, 0)
+        ticker = decision.get("ticker", "CASH").upper()
+        action = decision.get("action", "HOLD").upper()
 
-        if decision["price"] <= 0:
-            self.log.warning(f"Нет цены для {ticker} — сделку не исполняем")
-            return {"error": f"no_price_{ticker}", "decision": decision}
-
+        # Записываем решение в БД ВСЕГДА (даже без исполнения)
         self.record_decision(
             ticker=ticker,
-            action=decision.get("action", "HOLD"),
+            action=action,
             confidence=float(decision.get("confidence", 0.0)),
             reasoning=decision.get("reasoning", ""),
         )
 
         self.log.info(
-            f"Решение: {decision.get('action')} {ticker} "
+            f"Решение: {action} {ticker} "
             f"(уверенность {decision.get('confidence')})"
         )
 
+        # Если CASH или HOLD — просто держим деньги, не торгуем
+        if ticker == "CASH" or action == "HOLD":
+            self.log.info("Остаёмся в кэше — сделки нет")
+            return {**decision, "execution": {"executed": False, "reason": "cash_hold"}}
+
+        # Проверяем цену
+        prices = self.get_market_prices()
+        decision["price"] = prices.get(ticker, 0)
+
+        if decision["price"] <= 0:
+            self.log.warning(f"Нет цены для {ticker} — сделку не исполняем")
+            return {**decision, "execution": {"executed": False, "reason": "no_price"}}
+
+        # Исполняем через брокера
         execution = broker.execute(decision)
         self.log.info(f"Брокер: {execution}")
 
