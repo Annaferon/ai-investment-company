@@ -9,34 +9,32 @@ from src.broker.virtual_broker import broker
 
 
 SYSTEM_PROMPT = """Ты — профессиональный трейдер виртуальной инвестиционной компании.
-Твоя задача: на основе рыночных цен, текущего портфеля и НОВОСТНОГО ФОНА предложить ОДНО действие.
+Твоя задача: на основе рыночных цен, портфеля, НОВОСТНОГО ФОНА и РЫНОЧНОГО АНАЛИЗА предложить ОДНО действие.
 
 Правила:
-- Активы: акции РФ (MOEX), криптовалюты (Binance), драгметаллы.
-- Стартовый капитал: 10 000 ₽.
+- Активы: акции РФ (MOEX), криптовалюты, драгметаллы.
+- Все цены — в рублях (крипта сконвертирована по курсу USD/RUB).
 - Комиссия брокера: 0.05% от сделки.
 - Не рискуй более 20% капитала в одной сделке.
 - Если не уверен — выбирай HOLD.
-- Учитывай новостной фон: если sentiment негативный — будь осторожнее с покупками.
-- Если новостей нет — работай только по техническим данным.
+- При негативном новостном фоне — осторожнее с покупками.
+- При bearish-тренде — не покупай. При sideways — умеренно. При bullish — можно активнее.
+- При высокой волатильности снижай размер позиции.
 
-Отвечай СТРОГО в формате JSON, без пояснений:
+Отвечай СТРОГО в формате JSON:
 {
   "ticker": "SBER",
   "action": "BUY" | "SELL" | "HOLD",
   "quantity": 5,
   "confidence": 0.0-1.0,
-  "reasoning": "краткое объяснение на русском, 1-2 предложения"
+  "reasoning": "объяснение на русском, 1-2 предложения"
 }
 """
 
-# Сколько часов считаем данные «свежими»
 MAX_DATA_AGE_HOURS = 6
 
 
 class Trader(BaseAgent):
-    """Первый сотрудник компании."""
-
     DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
     def __init__(self, name: str = "Trader-01") -> None:
@@ -45,95 +43,104 @@ class Trader(BaseAgent):
     # ---------- Получение данных ----------
 
     def get_market_prices(self) -> dict[str, float]:
-    """Свежие цены. Крипта конвертируется в рубли по курсу USD/RUB."""
-    cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
-    rows = db.fetch_all(
-        """SELECT DISTINCT ON (ticker) ticker, price, asset_type
-           FROM market_prices
-           WHERE updated_at >= %s
-           ORDER BY ticker, updated_at DESC;""",
-        (cutoff,),
-    )
-    if not rows:
-        self.log.error("Нет свежих цен")
-        return {}
+        """Свежие цены. Крипта конвертируется в рубли по курсу USD/RUB."""
+        cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
+        rows = db.fetch_all(
+            """SELECT DISTINCT ON (ticker) ticker, price, asset_type
+               FROM market_prices
+               WHERE updated_at >= %s
+               ORDER BY ticker, updated_at DESC;""",
+            (cutoff,),
+        )
+        if not rows:
+            self.log.error("Нет свежих цен")
+            return {}
 
-    # Собираем сырые данные
-    raw = {}
-    usd_rub = 90.0  # fallback если курса нет
-    for r in rows:
-        ticker = r["ticker"]
-        price = float(r["price"])
-        atype = r["asset_type"]
-        if ticker == "USD_RUB":
-            usd_rub = price
-        else:
-            raw[ticker] = (price, atype)
+        raw = {}
+        usd_rub = 90.0
+        for r in rows:
+            ticker = r["ticker"]
+            price = float(r["price"])
+            atype = r["asset_type"]
+            if ticker == "USD_RUB":
+                usd_rub = price
+            else:
+                raw[ticker] = (price, atype)
 
-    # Конвертируем крипту в рубли
-    prices = {}
-    for ticker, (price, atype) in raw.items():
-        if atype == "crypto":
-            prices[ticker] = price * usd_rub
-        else:
-            prices[ticker] = price
+        prices = {}
+        for ticker, (price, atype) in raw.items():
+            if atype == "crypto":
+                prices[ticker] = price * usd_rub
+            else:
+                prices[ticker] = price
 
-    self.log.info(
-        f"Цен: {len(prices)} | Курс USD/RUB: {usd_rub:.2f}"
-    )
-    return prices
-  
+        self.log.info(
+            f"Цен: {len(prices)} | Курс USD/RUB: {usd_rub:.2f}"
+        )
+        return prices
+
     def get_portfolio(self) -> list[dict[str, Any]]:
-        """Что сейчас в портфеле."""
         return db.fetch_all("SELECT ticker, quantity, avg_price FROM portfolio;")
 
     def get_cash(self) -> float:
-        """Свободные деньги из таблицы account."""
         row = db.fetch_one("SELECT cash FROM account WHERE id = 1;")
         return float(row["cash"]) if row else 0.0
 
     def get_latest_news(self) -> dict[str, Any] | None:
-        """Последний новостной отчёт от News Analyst."""
         return db.fetch_one(
             """SELECT summary, sentiment, key_events, confidence, created_at
-               FROM news_reports
-               ORDER BY created_at DESC
-               LIMIT 1;"""
+               FROM news_reports ORDER BY created_at DESC LIMIT 1;"""
+        )
+
+    def get_latest_market(self) -> dict[str, Any] | None:
+        return db.fetch_one(
+            """SELECT summary, overall_trend, volatility_level, key_movers,
+                      confidence, created_at
+               FROM market_reports ORDER BY created_at DESC LIMIT 1;"""
         )
 
     # ---------- Принятие решения ----------
 
     def decide(self) -> dict[str, Any]:
-        """Спросить LLM, что делать. Требует свежих цен от Оракула."""
         prices = self.get_market_prices()
         if not prices:
-            raise RuntimeError(
-                "Нет свежих рыночных данных. Trader не может принять решение."
-            )
+            raise RuntimeError("Нет свежих рыночных данных")
 
         portfolio = self.get_portfolio()
         cash = self.get_cash()
         news = self.get_latest_news()
+        market = self.get_latest_market()
 
         if news:
             news_block = f"""НОВОСТНОЙ ФОН (от {news['created_at']}):
 Sentiment: {news['sentiment']}
-Краткий вывод: {news['summary']}
-Ключевые события:
-{news['key_events']}
-Уверенность News Analyst: {news['confidence']}"""
+Вывод: {news['summary']}
+События: {news['key_events']}
+Уверенность: {news['confidence']}"""
         else:
-            news_block = "НОВОСТНОЙ ФОН: нет данных."
+            news_block = "НОВОСТИ: нет данных."
 
-        prompt = f"""Текущие цены (реальные, от Оракула):
+        if market:
+            market_block = f"""РЫНОЧНЫЙ АНАЛИЗ (от {market['created_at']}):
+Тренд: {market['overall_trend']}
+Волатильность: {market['volatility_level']}
+Вывод: {market['summary']}
+Key movers: {market['key_movers']}
+Уверенность: {market['confidence']}"""
+        else:
+            market_block = "РЫНОК: нет данных."
+
+        prompt = f"""Текущие цены (в рублях):
 {json.dumps(prices, ensure_ascii=False, indent=2, default=float)}
 
-Текущий портфель:
+Портфель:
 {json.dumps(portfolio, ensure_ascii=False, indent=2, default=float) if portfolio else "пусто"}
 
 Свободные деньги: {cash:.2f} ₽
 
 {news_block}
+
+{market_block}
 
 Что делаем?"""
 
@@ -161,7 +168,7 @@ Sentiment: {news['sentiment']}
                 continue
 
         if not raw:
-            raise RuntimeError(f"Все модели недоступны. Последняя ошибка: {last_error}")
+            raise RuntimeError(f"Все модели недоступны: {last_error}")
 
         cleaned = raw.strip()
         if cleaned.startswith("```"):
@@ -170,15 +177,14 @@ Sentiment: {news['sentiment']}
         try:
             decision = json.loads(cleaned)
         except json.JSONDecodeError as e:
-            self.log.error(f"Не смог распарсить JSON: {raw}")
-            raise ValueError(f"LLM вернул невалидный JSON: {e}")
+            self.log.error(f"Невалидный JSON: {raw}")
+            raise ValueError(f"JSON parse error: {e}")
 
         return decision
 
     # ---------- Основной цикл ----------
 
     def run(self) -> dict[str, Any]:
-        """Один цикл работы Trader."""
         self.log.info("Trader просыпается...")
 
         try:
@@ -187,14 +193,13 @@ Sentiment: {news['sentiment']}
             self.log.error(f"Не смог принять решение: {e}")
             return {"error": str(e)}
 
-        # Подставляем цену из свежих данных
         prices = self.get_market_prices()
         ticker = decision.get("ticker", "?").upper()
         decision["price"] = prices.get(ticker, 0)
 
         if decision["price"] <= 0:
             self.log.warning(f"Нет цены для {ticker} — сделку не исполняем")
-            return {"error": f"no_price_for_{ticker}", "decision": decision}
+            return {"error": f"no_price_{ticker}", "decision": decision}
 
         self.record_decision(
             ticker=ticker,
