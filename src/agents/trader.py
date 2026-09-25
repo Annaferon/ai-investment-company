@@ -44,7 +44,7 @@ class Trader(BaseAgent):
 
     # ---------- Получение данных ----------
 
-    def def get_market_prices(self) -> dict[str, float]:
+    def get_market_prices(self) -> dict[str, float]:
     """Свежие цены. Крипта конвертируется в рубли по курсу USD/RUB."""
     cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
     rows = db.fetch_all(
@@ -58,23 +58,31 @@ class Trader(BaseAgent):
         self.log.error("Нет свежих цен")
         return {}
 
-    # Курс USD/RUB
-    usd_rub = 90.0  # fallback
-    raw = {r["ticker"]: (float(r["price"]), r["asset_type"]) for r in rows}
-    if "USD_RUB" in raw:
-        usd_rub = raw["USD_RUB"][0]
+    # Собираем сырые данные
+    raw = {}
+    usd_rub = 90.0  # fallback если курса нет
+    for r in rows:
+        ticker = r["ticker"]
+        price = float(r["price"])
+        atype = r["asset_type"]
+        if ticker == "USD_RUB":
+            usd_rub = price
+        else:
+            raw[ticker] = (price, atype)
 
+    # Конвертируем крипту в рубли
     prices = {}
     for ticker, (price, atype) in raw.items():
-        if ticker == "USD_RUB":
-            continue
         if atype == "crypto":
-            prices[ticker] = price * usd_rub  # в рублях
+            prices[ticker] = price * usd_rub
         else:
             prices[ticker] = price
 
-    self.log.info(f"Цен: {len(prices)} (курс USD/RUB: {usd_rub})")
+    self.log.info(
+        f"Цен: {len(prices)} | Курс USD/RUB: {usd_rub:.2f}"
+    )
     return prices
+  
     def get_portfolio(self) -> list[dict[str, Any]]:
         """Что сейчас в портфеле."""
         return db.fetch_all("SELECT ticker, quantity, avg_price FROM portfolio;")
