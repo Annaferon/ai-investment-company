@@ -23,9 +23,10 @@ MARKET_PRICES = {
 
 def get_daily_stats() -> dict:
     """Собираем статистику: капитал, портфель, сделки, решения."""
-    today_start = datetime.combine(date.today(), datetime.min.time())
-    today_end = datetime.combine(date.today(), datetime.max.time())
-
+    # Окно: последние 24 часа (а не «сегодня»)
+from datetime import timedelta
+today_end = datetime.now()
+today_start = today_end - timedelta(hours=24)
     # --- Кэш из account ---
     acc = db.fetch_one("SELECT cash, initial_capital FROM account WHERE id = 1;")
     cash = float(acc["cash"]) if acc else 0.0
