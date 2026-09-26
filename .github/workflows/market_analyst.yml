@@ -2,8 +2,8 @@ name: Run Market Analyst
 
 on:
   schedule:
-    # 18:15 МСК = 15:15 UTC — после Oracle, перед Trader
-    - cron: '15 15 * * *'
+    # 12:15 МСК = 09:15 UTC — к 18:15 МСК
+    - cron: '15 9 * * *'
   workflow_dispatch:
 
 jobs:
