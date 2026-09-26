@@ -1,0 +1,28 @@
+name: Run Metals Analyst
+
+on:
+  schedule:
+    # 12:12 МСК = 09:12 UTC — ежедневно
+    - cron: '12 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-metals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Metals Analyst
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python metals_main.py
