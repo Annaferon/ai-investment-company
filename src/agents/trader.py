@@ -6,6 +6,7 @@ from typing import Any
 from src.agents.base import BaseAgent
 from src.core.database import db
 from src.broker.virtual_broker import broker
+from src.risk.risk_manager import risk_manager
 
 
 SYSTEM_PROMPT = """Ты — профессиональный трейдер виртуальной инвестиционной компании.
@@ -15,10 +16,9 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 - Активы: акции РФ (MOEX), криптовалюты, драгметаллы.
 - Все цены — в рублях.
 - Комиссия брокера: 0.05%.
-- Не рискуй более 20% капитала в одной сделке.
+- Не рискуй более 20% капитала в одной сделке (Risk Manager проверит и скорректирует).
 - При негативном новостном фоне — осторожнее с покупками.
 - При bearish-тренде — не покупай. Sideways — умеренно. Bullish — можно активнее.
-- При высокой волатильности снижай размер позиции.
 - Если хочешь остаться в деньгах — ticker "CASH", action "HOLD".
 
 Если есть отчёты аналитиков (Stock, Crypto, Metals) — учитывай их оценки (score 0-10 и sentiment):
@@ -44,8 +44,6 @@ class Trader(BaseAgent):
 
     def __init__(self, name: str = "Trader-01") -> None:
         super().__init__(name=name, role="trader")
-
-    # ---------- Данные ----------
 
     def get_market_prices(self) -> dict[str, float]:
         cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
@@ -101,10 +99,8 @@ class Trader(BaseAgent):
         )
 
     def get_analysts_block(self) -> str:
-        """Сводка по всем аналитикам активов (Stock, Crypto, Metals)."""
         blocks = []
 
-        # Stock
         stocks = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
                FROM stock_reports
@@ -117,7 +113,6 @@ class Trader(BaseAgent):
                 lines.append(f"  • {s['ticker']}: {s['sentiment']} (score {s['score']}) — {s['reasoning'][:100]}")
             blocks.append("\n".join(lines))
 
-        # Crypto
         cryptos = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
                FROM crypto_reports
@@ -130,7 +125,6 @@ class Trader(BaseAgent):
                 lines.append(f"  • {c['ticker']}: {c['sentiment']} (score {c['score']}) — {c['reasoning'][:100]}")
             blocks.append("\n".join(lines))
 
-        # Metals
         metals = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
                FROM metals_reports
@@ -148,8 +142,6 @@ class Trader(BaseAgent):
 
         return "ОТЧЁТЫ АНАЛИТИКОВ:\n" + "\n\n".join(blocks)
 
-    # ---------- Принятие решения ----------
-
     def decide(self) -> dict[str, Any]:
         prices = self.get_market_prices()
         if not prices:
@@ -162,23 +154,20 @@ class Trader(BaseAgent):
         analysts_block = self.get_analysts_block()
 
         if news:
-            news_block = f"""НОВОСТНОЙ ФОН (от {news['created_at']}):
+            news_block = f"""НОВОСТНОЙ ФОН:
 Sentiment: {news['sentiment']}
-Вывод: {news['summary']}
-Уверенность: {news['confidence']}"""
+Вывод: {news['summary']}"""
         else:
             news_block = "НОВОСТИ: нет данных."
 
         if market:
-            market_block = f"""РЫНОЧНЫЙ АНАЛИЗ (от {market['created_at']}):
+            market_block = f"""РЫНОЧНЫЙ АНАЛИЗ:
 Тренд: {market['overall_trend']}
 Волатильность: {market['volatility_level']}
-Вывод: {market['summary']}
-Уверенность: {market['confidence']}"""
+Вывод: {market['summary']}"""
         else:
             market_block = "РЫНОК: нет данных."
 
-        # Подсказка про выходные
         weekend_hint = ""
         if datetime.now().weekday() >= 5:
             weekend_hint = "\nВАЖНО: Сегодня выходной. MOEX закрыт — акции РФ и металлы не торгуются. Можно торговать только криптой (BTC, ETH) или оставаться в CASH."
@@ -238,8 +227,6 @@ Sentiment: {news['sentiment']}
 
         return decision
 
-    # ---------- Основной цикл ----------
-
     def run(self) -> dict[str, Any]:
         self.log.info("Trader просыпается...")
 
@@ -268,6 +255,7 @@ Sentiment: {news['sentiment']}
             self.log.info("Остаёмся в кэше — сделки нет")
             return {**decision, "execution": {"executed": False, "reason": "cash_hold"}}
 
+        # Свежая цена
         prices = self.get_market_prices()
         decision["price"] = prices.get(ticker, 0)
 
@@ -275,7 +263,17 @@ Sentiment: {news['sentiment']}
             self.log.warning(f"Нет цены для {ticker} — сделку не исполняем")
             return {**decision, "execution": {"executed": False, "reason": "no_price"}}
 
-        execution = broker.execute(decision)
+        # === Risk Manager ===
+        checked = risk_manager.check(decision)
+        risk_status = checked.get("risk_check", {}).get("status")
+
+        if risk_status == "rejected":
+            reason = checked["risk_check"]["reason"]
+            self.log.warning(f"Risk Manager отклонил: {reason}")
+            return {**checked, "execution": {"executed": False, "reason": "risk_rejected", "detail": reason}}
+
+        # Исполняем скорректированное решение
+        execution = broker.execute(checked)
         self.log.info(f"Брокер: {execution}")
 
-        return {**decision, "execution": execution}
+        return {**checked, "execution": execution}
