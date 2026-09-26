@@ -9,17 +9,22 @@ from src.broker.virtual_broker import broker
 
 
 SYSTEM_PROMPT = """Ты — профессиональный трейдер виртуальной инвестиционной компании.
-Твоя задача: на основе рыночных цен, портфеля, НОВОСТНОГО ФОНА и РЫНОЧНОГО АНАЛИЗА предложить ОДНО действие.
+Твоя задача: на основе рыночных цен, портфеля и ОТЧЁТОВ АНАЛИТИКОВ предложить ОДНО действие.
 
 Правила:
 - Активы: акции РФ (MOEX), криптовалюты, драгметаллы.
 - Все цены — в рублях.
 - Комиссия брокера: 0.05%.
 - Не рискуй более 20% капитала в одной сделке.
-- При негативном фоне — осторожнее с покупками.
+- При негативном новостном фоне — осторожнее с покупками.
 - При bearish-тренде — не покупай. Sideways — умеренно. Bullish — можно активнее.
 - При высокой волатильности снижай размер позиции.
-- Если хочешь остаться в деньгах — используй ticker "CASH", action "HOLD".
+- Если хочешь остаться в деньгах — ticker "CASH", action "HOLD".
+
+Если есть отчёты аналитиков (Stock, Crypto, Metals) — учитывай их оценки (score 0-10 и sentiment):
+- score >= 7 — сильный сигнал
+- score 4-7 — нейтральный
+- score < 4 — избегай
 
 Отвечай СТРОГО в формате JSON:
 {
@@ -40,8 +45,9 @@ class Trader(BaseAgent):
     def __init__(self, name: str = "Trader-01") -> None:
         super().__init__(name=name, role="trader")
 
+    # ---------- Данные ----------
+
     def get_market_prices(self) -> dict[str, float]:
-        """Свежие цены. Крипта конвертируется в рубли по USD/RUB."""
         cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
         rows = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, price, asset_type
@@ -84,16 +90,65 @@ class Trader(BaseAgent):
 
     def get_latest_news(self) -> dict[str, Any] | None:
         return db.fetch_one(
-            """SELECT summary, sentiment, key_events, confidence, created_at
+            """SELECT summary, sentiment, confidence, created_at
                FROM news_reports ORDER BY created_at DESC LIMIT 1;"""
         )
 
     def get_latest_market(self) -> dict[str, Any] | None:
         return db.fetch_one(
-            """SELECT summary, overall_trend, volatility_level, key_movers,
-                      confidence, created_at
+            """SELECT summary, overall_trend, volatility_level, confidence, created_at
                FROM market_reports ORDER BY created_at DESC LIMIT 1;"""
         )
+
+    def get_analysts_block(self) -> str:
+        """Сводка по всем аналитикам активов (Stock, Crypto, Metals)."""
+        blocks = []
+
+        # Stock
+        stocks = db.fetch_all(
+            """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
+               FROM stock_reports
+               WHERE created_at >= NOW() - INTERVAL '24 hours'
+               ORDER BY ticker, created_at DESC;"""
+        )
+        if stocks:
+            lines = ["АКЦИИ РФ:"]
+            for s in stocks:
+                lines.append(f"  • {s['ticker']}: {s['sentiment']} (score {s['score']}) — {s['reasoning'][:100]}")
+            blocks.append("\n".join(lines))
+
+        # Crypto
+        cryptos = db.fetch_all(
+            """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
+               FROM crypto_reports
+               WHERE created_at >= NOW() - INTERVAL '24 hours'
+               ORDER BY ticker, created_at DESC;"""
+        )
+        if cryptos:
+            lines = ["КРИПТОВАЛЮТЫ:"]
+            for c in cryptos:
+                lines.append(f"  • {c['ticker']}: {c['sentiment']} (score {c['score']}) — {c['reasoning'][:100]}")
+            blocks.append("\n".join(lines))
+
+        # Metals
+        metals = db.fetch_all(
+            """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
+               FROM metals_reports
+               WHERE created_at >= NOW() - INTERVAL '48 hours'
+               ORDER BY ticker, created_at DESC;"""
+        )
+        if metals:
+            lines = ["ДРАГМЕТАЛЛЫ:"]
+            for m in metals:
+                lines.append(f"  • {m['ticker']}: {m['sentiment']} (score {m['score']}) — {m['reasoning'][:100]}")
+            blocks.append("\n".join(lines))
+
+        if not blocks:
+            return "ОТЧЁТЫ АНАЛИТИКОВ: пока нет данных."
+
+        return "ОТЧЁТЫ АНАЛИТИКОВ:\n" + "\n\n".join(blocks)
+
+    # ---------- Принятие решения ----------
 
     def decide(self) -> dict[str, Any]:
         prices = self.get_market_prices()
@@ -104,6 +159,7 @@ class Trader(BaseAgent):
         cash = self.get_cash()
         news = self.get_latest_news()
         market = self.get_latest_market()
+        analysts_block = self.get_analysts_block()
 
         if news:
             news_block = f"""НОВОСТНОЙ ФОН (от {news['created_at']}):
@@ -138,6 +194,8 @@ Sentiment: {news['sentiment']}
 {news_block}
 
 {market_block}
+
+{analysts_block}
 {weekend_hint}
 
 Что делаем? Если ничего не покупаем — используй ticker "CASH", action "HOLD"."""
@@ -180,6 +238,8 @@ Sentiment: {news['sentiment']}
 
         return decision
 
+    # ---------- Основной цикл ----------
+
     def run(self) -> dict[str, Any]:
         self.log.info("Trader просыпается...")
 
@@ -192,7 +252,6 @@ Sentiment: {news['sentiment']}
         ticker = decision.get("ticker", "CASH").upper()
         action = decision.get("action", "HOLD").upper()
 
-        # Записываем решение ВСЕГДА
         self.record_decision(
             ticker=ticker,
             action=action,
@@ -205,7 +264,6 @@ Sentiment: {news['sentiment']}
             f"(уверенность {decision.get('confidence')})"
         )
 
-        # CASH / HOLD — не торгуем
         if ticker == "CASH" or action == "HOLD":
             self.log.info("Остаёмся в кэше — сделки нет")
             return {**decision, "execution": {"executed": False, "reason": "cash_hold"}}
