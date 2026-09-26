@@ -1,0 +1,28 @@
+name: Run Crypto Analyst
+
+on:
+  schedule:
+    # 12:10 МСК = 09:10 UTC — ежедневно (крипта 24/7)
+    - cron: '10 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-crypto:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Crypto Analyst
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python crypto_main.py
