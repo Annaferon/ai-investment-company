@@ -19,7 +19,7 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 - При негативном фоне — осторожнее с покупками.
 - При bearish-тренде — не покупай. Sideways — умеренно. Bullish — можно активнее.
 - При высокой волатильности снижай размер позиции.
-- Если хочешь остаться в деньгах — используй ticker "CASH" и action "HOLD".
+- Если хочешь остаться в деньгах — используй ticker "CASH", action "HOLD".
 
 Отвечай СТРОГО в формате JSON:
 {
@@ -39,8 +39,6 @@ class Trader(BaseAgent):
 
     def __init__(self, name: str = "Trader-01") -> None:
         super().__init__(name=name, role="trader")
-
-    # ---------- Получение данных ----------
 
     def get_market_prices(self) -> dict[str, float]:
         """Свежие цены. Крипта конвертируется в рубли по USD/RUB."""
@@ -97,8 +95,6 @@ class Trader(BaseAgent):
                FROM market_reports ORDER BY created_at DESC LIMIT 1;"""
         )
 
-    # ---------- Принятие решения ----------
-
     def decide(self) -> dict[str, Any]:
         prices = self.get_market_prices()
         if not prices:
@@ -126,6 +122,11 @@ Sentiment: {news['sentiment']}
         else:
             market_block = "РЫНОК: нет данных."
 
+        # Подсказка про выходные
+        weekend_hint = ""
+        if datetime.now().weekday() >= 5:
+            weekend_hint = "\nВАЖНО: Сегодня выходной. MOEX закрыт — акции РФ и металлы не торгуются. Можно торговать только криптой (BTC, ETH) или оставаться в CASH."
+
         prompt = f"""Текущие цены (в рублях):
 {json.dumps(prices, ensure_ascii=False, indent=2, default=float)}
 
@@ -137,6 +138,7 @@ Sentiment: {news['sentiment']}
 {news_block}
 
 {market_block}
+{weekend_hint}
 
 Что делаем? Если ничего не покупаем — используй ticker "CASH", action "HOLD"."""
 
@@ -178,8 +180,6 @@ Sentiment: {news['sentiment']}
 
         return decision
 
-    # ---------- Основной цикл ----------
-
     def run(self) -> dict[str, Any]:
         self.log.info("Trader просыпается...")
 
@@ -192,7 +192,7 @@ Sentiment: {news['sentiment']}
         ticker = decision.get("ticker", "CASH").upper()
         action = decision.get("action", "HOLD").upper()
 
-        # Записываем решение в БД ВСЕГДА (даже без исполнения)
+        # Записываем решение ВСЕГДА
         self.record_decision(
             ticker=ticker,
             action=action,
@@ -205,12 +205,11 @@ Sentiment: {news['sentiment']}
             f"(уверенность {decision.get('confidence')})"
         )
 
-        # Если CASH или HOLD — просто держим деньги, не торгуем
+        # CASH / HOLD — не торгуем
         if ticker == "CASH" or action == "HOLD":
             self.log.info("Остаёмся в кэше — сделки нет")
             return {**decision, "execution": {"executed": False, "reason": "cash_hold"}}
 
-        # Проверяем цену
         prices = self.get_market_prices()
         decision["price"] = prices.get(ticker, 0)
 
@@ -218,7 +217,6 @@ Sentiment: {news['sentiment']}
             self.log.warning(f"Нет цены для {ticker} — сделку не исполняем")
             return {**decision, "execution": {"executed": False, "reason": "no_price"}}
 
-        # Исполняем через брокера
         execution = broker.execute(decision)
         self.log.info(f"Брокер: {execution}")
 
