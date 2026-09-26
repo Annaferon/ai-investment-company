@@ -2,8 +2,8 @@ name: Daily Report
 
 on:
   schedule:
-    # 21:00 МСК = 18:00 UTC
-    - cron: '0 18 * * *'
+    # 15:00 МСК = 12:00 UTC — к 21:00 МСК
+    - cron: '0 12 * * *'
   workflow_dispatch:
 
 jobs:
