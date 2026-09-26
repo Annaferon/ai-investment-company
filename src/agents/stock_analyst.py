@@ -1,6 +1,6 @@
 """Stock Analyst — оценка акций РФ через LLM."""
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from src.agents.base import BaseAgent
@@ -13,26 +13,25 @@ SYSTEM_PROMPT = """Ты — старший аналитик акций росс�
 Для каждой акции оцени:
 - sentiment: bullish (рост) | neutral (боковик) | bearish (падение)
 - score: от 0 до 10 (насколько привлекательна для покупки прямо сейчас)
+- confidence: 0.0-1.0 (насколько ты уверен)
 - reasoning: 1-2 предложения — почему такая оценка
 
 Учитывай:
-- Текущую цену (она есть в промпте)
+- Текущую цену (есть в промпте)
 - Твои знания о компании (сектор, размер, репутация)
 - Новостной фон (если передан)
 
 Требования:
 - Кратко, по делу, на русском.
-- Если про компанию мало знаешь — ставь нейтральную оценку и confidence низкий.
+- Если про компанию мало знаешь — низкий confidence.
 - Не выдумывай точные цифры (P/E, выручку), которых нет в промпте.
 
-Отвечай СТРОГО в формате JSON-массива, без пояснений:
+Отвечай СТРОГО JSON-массивом:
 [
-  {"ticker": "SBER", "sentiment": "bullish", "score": 7.5, "reasoning": "..."},
-  {"ticker": "GAZP", "sentiment": "bearish", "score": 3.0, "reasoning": "..."}
+  {"ticker": "SBER", "sentiment": "bullish", "score": 7.5, "confidence": 0.7, "reasoning": "..."}
 ]
 """
 
-# Сколько часов считаем данные свежими
 MAX_DATA_AGE_HOURS = 6
 
 
@@ -43,8 +42,6 @@ class StockAnalyst(BaseAgent):
 
     def __init__(self, name: str = "Stock-01") -> None:
         super().__init__(name=name, role="stock_analyst")
-
-    # ---------- Получение данных ----------
 
     def get_stock_prices(self) -> dict[str, float]:
         """Свежие цены акций (asset_type = 'stock')."""
@@ -67,10 +64,7 @@ class StockAnalyst(BaseAgent):
     def get_portfolio(self) -> list[dict[str, Any]]:
         return db.fetch_all("SELECT ticker, quantity, avg_price FROM portfolio;")
 
-    # ---------- Анализ ----------
-
     def analyze(self, prices: dict[str, float]) -> list[dict[str, Any]]:
-        """Отдать акции в LLM и получить оценки."""
         news = self.get_latest_news()
         portfolio = self.get_portfolio()
 
@@ -89,7 +83,7 @@ Sentiment: {news['sentiment']}
 
 {news_block}
 
-Оцени каждую акцию из списка выше."""
+Оцени каждую акцию."""
 
         raw = self.think(prompt=prompt, system=SYSTEM_PROMPT)
 
@@ -109,8 +103,6 @@ Sentiment: {news['sentiment']}
         return results
 
     def save_reports(self, reports: list[dict[str, Any]]) -> int:
-        """Сохраняем отчёты в БД."""
-        from datetime import date
         count = 0
         for r in reports:
             try:
@@ -133,17 +125,20 @@ Sentiment: {news['sentiment']}
                 self.log.error(f"Ошибка сохранения {r.get('ticker')}: {e}")
         return count
 
-    # ---------- Основной цикл ----------
-
     def run(self) -> dict[str, Any]:
         self.log.info("Stock Analyst просыпается...")
+
+        # Выходные — MOEX закрыт
+        if datetime.now().weekday() >= 5:
+            self.log.info("Сегодня выходной — Stock Analyst отдыхает")
+            return {"status": "skipped_weekend"}
 
         prices = self.get_stock_prices()
         if not prices:
             self.log.warning("Нет свежих цен акций")
             return {"error": "no_prices"}
 
-        self.log.info(f"Анализируем {len(prices)} акций: {list(prices.keys())}")
+        self.log.info(f"Анализируем {len(prices)} акций")
 
         try:
             reports = self.analyze(prices)
@@ -152,9 +147,8 @@ Sentiment: {news['sentiment']}
             return {"error": str(e)}
 
         saved = self.save_reports(reports)
-        self.log.info(f"Сохранено {saved} отчётов по акциям")
+        self.log.info(f"Сохранено {saved} отчётов")
 
-        # Логируем топ
         if reports:
             top = sorted(reports, key=lambda x: float(x.get("score", 0)), reverse=True)[:3]
             self.log.info(f"Топ-3: {[(r['ticker'], r['score']) for r in top]}")
