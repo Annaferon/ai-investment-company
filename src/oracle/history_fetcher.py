@@ -1,6 +1,5 @@
-"""Загрузка истории цен: CoinCap (крипта) + MOEX (акции).
-CoinCap — бесплатно, без ключа, история с 2009 года.
-MOEX — 3 года (может занять 60-90 минут)."""
+"""Загрузка истории цен: CoinPaprika (крипта) + MOEX (акции).
+CoinPaprika — бесплатно, без ключа, годовая история за один запрос."""
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -10,13 +9,13 @@ from src.core.logger import get_logger
 
 log = get_logger("history_fetcher")
 
-# --- CoinCap (крипта) ---
-COINCAP_BASE = "https://api.coincap.io/v2"
+# --- CoinPaprika (крипта) ---
+COINPAPRIKA_BASE = "https://api.coinpaprika.com/v1"
 CRYPTO_IDS = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-    "BNB": "binance-coin",
+    "BTC": "btc-bitcoin",
+    "ETH": "eth-ethereum",
+    "SOL": "sol-solana",
+    "BNB": "bnb-binance-coin",
 }
 
 # --- MOEX ---
@@ -28,59 +27,57 @@ MOEX_TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "ROSN",
                 "NVTK", "TATN", "SNGS", "PLZL", "MTSS"]
 
 # Периоды
-CRYPTO_DAYS_FULL = 1460   # 4 года
+CRYPTO_DAYS_FULL = 365    # CoinPaprika free = 1 год
 STOCK_DAYS_FULL = 1095    # 3 года
 
 TIMEOUT_SEC = 30
 
 
-# ---------- CoinCap (крипта) ----------
+# ---------- CoinPaprika (крипта) ----------
 
-def fetch_coincap_history(coin_id: str, days: int) -> list[dict]:
-    """История цен монеты с CoinCap (в USD)."""
+def fetch_coinpaprika_history(coin_id: str, days: int) -> list[dict]:
+    """История цен монеты с CoinPaprika (в USD)."""
     end = datetime.now()
-    start = end - timedelta(days=days)
+    start = end - timedelta(days=min(days, 365))
 
-    url = f"{COINCAP_BASE}/assets/{coin_id}/history"
+    url = f"{COINPAPRIKA_BASE}/tickers/{coin_id}/historical"
     try:
         r = requests.get(
             url,
-            params={
-                "interval": "d1",
-                "start": int(start.timestamp() * 1000),
-                "end": int(end.timestamp() * 1000),
-            },
+            params={"start": start.strftime("%Y-%m-%d"), "interval": "1d"},
             timeout=TIMEOUT_SEC,
         )
         r.raise_for_status()
         data = r.json()
     except Exception as e:
-        log.error(f"CoinCap {coin_id}: {e}")
+        log.error(f"CoinPaprika {coin_id}: {e}")
         return []
 
-    prices = data.get("data", [])
-    if not prices:
-        log.warning(f"CoinCap {coin_id}: пустой ответ")
+    if not isinstance(data, list):
+        log.warning(f"CoinPaprika {coin_id}: неожиданный формат")
         return []
 
     result = []
-    for p in prices:
+    for p in data:
         try:
-            date_str = datetime.fromtimestamp(p["time"] / 1000).date().isoformat()
-            result.append({"date": date_str, "price": float(p["priceUsd"])})
+            ts = p.get("timestamp", "")
+            price = p.get("price")
+            if ts and price:
+                date_str = ts[:10]
+                result.append({"date": date_str, "price": float(price)})
         except Exception:
             continue
 
-    log.info(f"CoinCap {coin_id}: {len(result)} точек за {days} дней")
+    log.info(f"CoinPaprika {coin_id}: {len(result)} точек за {days} дней")
     return result
 
 
 def load_crypto_history(days: int) -> int:
     total = 0
-    for ticker, cc_id in CRYPTO_IDS.items():
-        records = fetch_coincap_history(cc_id, days)
+    for ticker, cp_id in CRYPTO_IDS.items():
+        records = fetch_coinpaprika_history(cp_id, days)
         if records:
-            saved = save_history(records, ticker, "crypto", "USD", "coincap")
+            saved = save_history(records, ticker, "crypto", "USD", "coinpaprika")
             total += saved
     return total
 
