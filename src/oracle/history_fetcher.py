@@ -1,4 +1,6 @@
-"""Загрузка истории цен: CoinGecko (крипта) + MOEX (акции + металлы)."""
+"""Загрузка истории цен: CoinCap (крипта) + MOEX (акции).
+CoinCap — бесплатно, без ключа, история с 2009 года.
+MOEX — 3 года (может занять 60-90 минут)."""
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -8,13 +10,13 @@ from src.core.logger import get_logger
 
 log = get_logger("history_fetcher")
 
-# --- CoinGecko ---
-COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+# --- CoinCap (крипта) ---
+COINCAP_BASE = "https://api.coincap.io/v2"
 CRYPTO_IDS = {
     "BTC": "bitcoin",
     "ETH": "ethereum",
     "SOL": "solana",
-    "BNB": "binancecoin",
+    "BNB": "binance-coin",
 }
 
 # --- MOEX ---
@@ -25,65 +27,74 @@ MOEX_HISTORY_URL = (
 MOEX_TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "ROSN",
                 "NVTK", "TATN", "SNGS", "PLZL", "MTSS"]
 
-CRYPTO_DAYS = 1460   # 4 года
-STOCK_DAYS = 1095    # 3 года
+# Периоды
+CRYPTO_DAYS_FULL = 1460   # 4 года
+STOCK_DAYS_FULL = 1095    # 3 года
 
 TIMEOUT_SEC = 30
 
 
-# ---------- CoinGecko ----------
+# ---------- CoinCap (крипта) ----------
 
-def fetch_coingecko_history(coin_id: str, days: int = CRYPTO_DAYS) -> list[dict]:
-    """История цен монеты с CoinGecko (в USD)."""
-    url = f"{COINGECKO_BASE}/coins/{coin_id}/market_chart"
+def fetch_coincap_history(coin_id: str, days: int) -> list[dict]:
+    """История цен монеты с CoinCap (в USD)."""
+    end = datetime.now()
+    start = end - timedelta(days=days)
+
+    url = f"{COINCAP_BASE}/assets/{coin_id}/history"
     try:
         r = requests.get(
             url,
-            params={"vs_currency": "usd", "days": days},
+            params={
+                "interval": "d1",
+                "start": int(start.timestamp() * 1000),
+                "end": int(end.timestamp() * 1000),
+            },
             timeout=TIMEOUT_SEC,
         )
         r.raise_for_status()
         data = r.json()
     except Exception as e:
-        log.error(f"CoinGecko {coin_id}: {e}")
+        log.error(f"CoinCap {coin_id}: {e}")
         return []
 
-    prices = data.get("prices", [])
+    prices = data.get("data", [])
     if not prices:
-        log.warning(f"CoinGecko {coin_id}: пустой ответ")
+        log.warning(f"CoinCap {coin_id}: пустой ответ")
         return []
 
-    by_date: dict[str, float] = {}
-    for ts_ms, price in prices:
-        dt = datetime.fromtimestamp(ts_ms / 1000).date().isoformat()
-        by_date[dt] = float(price)
+    result = []
+    for p in prices:
+        try:
+            date_str = datetime.fromtimestamp(p["time"] / 1000).date().isoformat()
+            result.append({"date": date_str, "price": float(p["priceUsd"])})
+        except Exception:
+            continue
 
-    result = [{"date": d, "price": p} for d, p in sorted(by_date.items())]
-    log.info(f"CoinGecko {coin_id}: {len(result)} точек за {days} дней")
+    log.info(f"CoinCap {coin_id}: {len(result)} точек за {days} дней")
     return result
 
 
-def load_crypto_history() -> int:
+def load_crypto_history(days: int) -> int:
     total = 0
-    for ticker, cg_id in CRYPTO_IDS.items():
-        records = fetch_coingecko_history(cg_id, CRYPTO_DAYS)
+    for ticker, cc_id in CRYPTO_IDS.items():
+        records = fetch_coincap_history(cc_id, days)
         if records:
-            saved = save_history(records, ticker, "crypto", "USD", "coingecko")
+            saved = save_history(records, ticker, "crypto", "USD", "coincap")
             total += saved
     return total
 
 
-# ---------- MOEX ----------
+# ---------- MOEX (акции) ----------
 
-def fetch_moex_history(ticker: str, days: int = STOCK_DAYS) -> list[dict]:
-    """История акций с MOEX ISS (в рублях) с пагинацией."""
+def fetch_moex_history(ticker: str, days: int) -> list[dict]:
     to_date = datetime.now().date()
     from_date = to_date - timedelta(days=days)
 
     result: dict[str, float] = {}
     start = 0
     page_size = 100
-    max_pages = 20
+    max_pages = 30
 
     for _ in range(max_pages):
         try:
@@ -129,14 +140,14 @@ def fetch_moex_history(ticker: str, days: int = STOCK_DAYS) -> list[dict]:
         start += page_size
 
     out = [{"date": d, "price": p} for d, p in sorted(result.items())]
-    log.info(f"MOEX {ticker}: {len(out)} точек")
+    log.info(f"MOEX {ticker}: {len(out)} точек за {days} дней")
     return out
 
 
-def load_stock_history() -> int:
+def load_stock_history(days: int) -> int:
     total = 0
     for ticker in MOEX_TICKERS:
-        records = fetch_moex_history(ticker, STOCK_DAYS)
+        records = fetch_moex_history(ticker, days)
         if records:
             saved = save_history(records, ticker, "stock", "RUB", "moex")
             total += saved
@@ -146,13 +157,9 @@ def load_stock_history() -> int:
 # ---------- Сохранение ----------
 
 def save_history(
-    records: list[dict],
-    ticker: str,
-    asset_type: str,
-    currency: str,
-    source: str,
+    records: list[dict], ticker: str, asset_type: str,
+    currency: str, source: str,
 ) -> int:
-    """Сохраняем историю в БД. Дубликаты обновляются."""
     from src.core.database import db
     count = 0
     for r in records:
@@ -173,16 +180,17 @@ def save_history(
 
 # ---------- Главный цикл ----------
 
-def run_history_loader() -> dict[str, Any]:
-    log.info("Начинаем загрузку истории цен...")
+def run_history_loader(days: int) -> dict[str, Any]:
+    log.info(f"Начинаем загрузку истории за {days} дней...")
 
-    crypto_saved = load_crypto_history()
-    stock_saved = load_stock_history()
+    crypto_saved = load_crypto_history(min(days, CRYPTO_DAYS_FULL))
+    stock_saved = load_stock_history(min(days, STOCK_DAYS_FULL))
 
     total = crypto_saved + stock_saved
     log.info(f"Загрузка завершена. Всего точек: {total}")
 
     return {
+        "days": days,
         "crypto_saved": crypto_saved,
         "stock_saved": stock_saved,
         "total": total,
