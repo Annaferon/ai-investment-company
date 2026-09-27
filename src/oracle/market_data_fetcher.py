@@ -1,13 +1,17 @@
-"""Оракул: сбор рыночных данных с MOEX, CoinGecko, ЦБ РФ."""
+"""Оракул: сбор рыночных данных с MOEX, CoinGecko, ЦБ РФ.
+Крипта — 24/7. MOEX/ЦБ — только в рабочие часы Пн-Пт."""
 import time
-from datetime import datetime
-from typing import Any, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import requests
 
 from src.core.logger import get_logger
 
 log = get_logger("oracle")
+
+# МСК = UTC+3
+MSK = timezone(timedelta(hours=3))
 
 # --- MOEX ---
 MOEX_BASE = "https://iss.moex.com/iss"
@@ -29,8 +33,24 @@ TIMEOUT_SEC = 8
 FATAL_CODES = {400, 401, 403, 404, 451}
 
 
+def _now_msk() -> datetime:
+    return datetime.now(MSK)
+
+
 def _is_weekend() -> bool:
-    return datetime.now().weekday() >= 5
+    return _now_msk().weekday() >= 5
+
+
+def _is_moex_open() -> bool:
+    """MOEX работает Пн-Пт 07:00-23:50 МСК."""
+    now = _now_msk()
+    if now.weekday() >= 5:
+        return False
+    if now.hour < 7:
+        return False
+    if now.hour == 23 and now.minute > 50:
+        return False
+    return True
 
 
 def _retry(func, *args, **kwargs):
@@ -57,8 +77,9 @@ def _retry(func, *args, **kwargs):
     return None
 
 
+# ---------- MOEX ----------
+
 def fetch_moex_bulk() -> dict[str, float]:
-    """Один запрос — цены всех нужных бумаг MOEX."""
     try:
         r = requests.get(
             MOEX_BULK_URL,
@@ -91,7 +112,7 @@ def fetch_moex_bulk() -> dict[str, float]:
             break
 
     if idx_price is None:
-        log.error(f"MOEX: не нашли ни одно поле из {candidate_fields}")
+        log.error("MOEX: не нашли поле цены")
         return {}
 
     prices = {}
@@ -106,6 +127,8 @@ def fetch_moex_bulk() -> dict[str, float]:
     log.info(f"MOEX: получено {len(prices)} цен (поле: {field_used})")
     return prices
 
+
+# ---------- CoinGecko ----------
 
 def fetch_coingecko_prices() -> dict[str, float]:
     ids = ",".join(CRYPTO_IDS.values())
@@ -130,12 +153,13 @@ def fetch_coingecko_prices() -> dict[str, float]:
     return prices
 
 
+# ---------- ЦБ РФ ----------
+
 def fetch_cbr_metals() -> dict[str, float]:
-    """Цены драгметаллов + курс USD/RUB."""
     result = {}
 
-    if _is_weekend():
-        log.info("Выходной — берём последние цены металлов/курса из БД")
+    if not _is_moex_open():
+        log.info("MOEX закрыт — металлы/курс берём из БД")
         from src.core.database import db
         rows = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, price
@@ -179,18 +203,20 @@ def save_prices_to_db(prices: dict[str, float], asset_type: str, source: str) ->
             count += 1
         except Exception as e:
             log.error(f"Ошибка сохранения {ticker}: {e}")
-    log.info(f"Сохранено {count} цен ({asset_type}, {source})")
     return count
 
 
 def run_oracle() -> dict[str, Any]:
     log.info("Оракул просыпается...")
     is_weekend = _is_weekend()
+    moex_open = _is_moex_open()
 
-    if is_weekend:
-        log.info("Сегодня выходной — акции MOEX пропускаем")
+    if moex_open:
+        moex_prices = fetch_moex_bulk()
+    else:
+        log.info("MOEX закрыт — акции пропускаем")
+        moex_prices = {}
 
-    moex_prices = {} if is_weekend else fetch_moex_bulk()
     crypto_prices = fetch_coingecko_prices()
     metals_prices = fetch_cbr_metals()
 
@@ -210,4 +236,5 @@ def run_oracle() -> dict[str, Any]:
         "metals": metals_prices,
         "total": total,
         "weekend_mode": is_weekend,
+        "moex_open": moex_open,
     }
