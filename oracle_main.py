@@ -9,10 +9,10 @@ from src.oracle.market_data_fetcher import run_oracle
 
 
 def _format_prices(prices: dict[str, float], emoji: str, title: str) -> str:
-    """Красиво форматируем цены для Telegram."""
+    """Форматируем цены для Telegram."""
     if not prices:
         return f"{emoji} {title}: нет данных"
-    lines = [f"{emoji} *{title}*"]
+    lines = [f"{emoji} {title}"]
     for ticker, price in sorted(prices.items()):
         lines.append(f"  • {ticker}: {price:,.2f}")
     return "\n".join(lines)
@@ -42,12 +42,11 @@ def main() -> int:
         notify("🔮 ORACLE", f"❌ Оракул упал: {e}")
         return 1
 
-    # Формируем красивое сообщение с ценами
     parts = []
     parts.append(_format_prices(result.get("moex", {}), "📈", "Акции MOEX (₽)"))
     parts.append(_format_prices(result.get("crypto", {}), "₿", "Крипта (USD)"))
     parts.append(_format_prices(result.get("metals", {}), "🥇", "Металлы + курс"))
-    parts.append(f"\n*Всего: {result.get('total', 0)} цен*")
+    parts.append(f"Всего: {result.get('total', 0)} цен")
 
     if result.get("weekend_mode"):
         parts.append("🏖 Выходной режим (MOEX закрыт)")
