@@ -1,4 +1,4 @@
-"""Запуск Оракула."""
+"""Запуск Оракула. Уведомление в Telegram при каждом запуске."""
 import sys
 
 from src.core.config import config
@@ -9,7 +9,6 @@ from src.oracle.market_data_fetcher import run_oracle
 
 
 def _format_prices(prices: dict[str, float], emoji: str, title: str) -> str:
-    """Форматируем цены для Telegram."""
     if not prices:
         return f"{emoji} {title}: нет данных"
     lines = [f"{emoji} {title}"]
@@ -27,34 +26,35 @@ def main() -> int:
         config.validate()
     except ValueError as e:
         logger.error(f"Ошибка конфигурации: {e}")
-        notify("🔮 ORACLE", f"❌ Ошибка конфигурации: {e}")
+        notify("🔮 ORACLE", f"❌ Ошибка конфигурации: {e}", force=True)
         return 1
 
     if not db.health_check():
         logger.error("Нет связи с Supabase")
-        notify("🔮 ORACLE", "❌ Нет связи с Supabase")
+        notify("🔮 ORACLE", "❌ Нет связи с Supabase", force=True)
         return 1
 
     try:
         result = run_oracle()
     except Exception as e:
         logger.error(f"Оракул упал: {e}")
-        notify("🔮 ORACLE", f"❌ Оракул упал: {e}")
+        notify("🔮 ORACLE", f"❌ Оракул упал: {e}", force=True)
         return 1
 
+    # ВСЕГДА отправляем уведомление
     parts = []
     parts.append(_format_prices(result.get("moex", {}), "📈", "Акции MOEX (₽)"))
     parts.append(_format_prices(result.get("crypto", {}), "₿", "Крипта (USD)"))
     parts.append(_format_prices(result.get("metals", {}), "🥇", "Металлы + курс"))
     parts.append(f"Всего: {result.get('total', 0)} цен")
 
-    if result.get("weekend_mode"):
-        parts.append("🏖 Выходной режим (MOEX закрыт)")
+    if not result.get("moex_open"):
+        parts.append("🏖 MOEX закрыт — акции пропущены")
 
     notify("🔮 ORACLE", "\n\n".join(parts))
 
     logger.info("=" * 60)
-    logger.info(f"Результат: {result}")
+    logger.info(f"Результат: total={result.get('total', 0)}")
     logger.info("=" * 60)
     return 0
 
