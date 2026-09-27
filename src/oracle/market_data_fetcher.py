@@ -30,7 +30,6 @@ FATAL_CODES = {400, 401, 403, 404, 451}
 
 
 def _is_weekend() -> bool:
-    """True если сегодня суббота или воскресенье."""
     return datetime.now().weekday() >= 5
 
 
@@ -57,8 +56,6 @@ def _retry(func, *args, **kwargs):
             time.sleep(RETRY_DELAY_SEC)
     return None
 
-
-# --- MOEX (bulk) ---
 
 def fetch_moex_bulk() -> dict[str, float]:
     """Один запрос — цены всех нужных бумаг MOEX."""
@@ -110,8 +107,6 @@ def fetch_moex_bulk() -> dict[str, float]:
     return prices
 
 
-# --- CoinGecko (крипта 24/7) ---
-
 def fetch_coingecko_prices() -> dict[str, float]:
     ids = ",".join(CRYPTO_IDS.values())
     url = f"{COINGECKO_BASE}/simple/price"
@@ -135,13 +130,8 @@ def fetch_coingecko_prices() -> dict[str, float]:
     return prices
 
 
-# --- ЦБ РФ (металлы + курс) ---
-
 def fetch_cbr_metals() -> dict[str, float]:
-    """
-    Цены драгметаллов + курс USD/RUB.
-    В выходные ЦБ не обновляет — возвращаем последние известные из БД.
-    """
+    """Цены драгметаллов + курс USD/RUB."""
     result = {}
 
     if _is_weekend():
@@ -155,11 +145,8 @@ def fetch_cbr_metals() -> dict[str, float]:
         )
         for r in rows:
             result[r["ticker"]] = float(r["price"])
-        if result:
-            log.info(f"Из БД взято: {list(result.keys())}")
         return result
 
-    # Будний день — пробуем получить курс USD/RUB
     try:
         r = requests.get(
             "https://www.cbr-xml-daily.ru/daily_json.js",
@@ -170,11 +157,9 @@ def fetch_cbr_metals() -> dict[str, float]:
         usd = data.get("Valute", {}).get("USD", {}).get("Value")
         if usd:
             result["USD_RUB"] = float(usd)
-            log.info(f"USD/RUB курс: {usd}")
     except Exception as e:
         log.warning(f"Не получили курс USD/RUB: {e}")
 
-    # Заглушки для металлов (TODO: парсинг XML ЦБ)
     result["GOLD"] = 7500.0
     result["SILVER"] = 95.0
 
@@ -205,13 +190,8 @@ def run_oracle() -> dict[str, Any]:
     if is_weekend:
         log.info("Сегодня выходной — акции MOEX пропускаем")
 
-    # Акции — только по будням
     moex_prices = {} if is_weekend else fetch_moex_bulk()
-
-    # Крипта — всегда (24/7)
     crypto_prices = fetch_coingecko_prices()
-
-    # Металлы + курс
     metals_prices = fetch_cbr_metals()
 
     if not moex_prices and not crypto_prices and not metals_prices:
@@ -225,9 +205,9 @@ def run_oracle() -> dict[str, Any]:
     log.info(f"Оракул завершил работу. Всего цен: {total}")
 
     return {
-        "moex": len(moex_prices),
-        "crypto": len(crypto_prices),
-        "metals": len(metals_prices),
+        "moex": moex_prices,
+        "crypto": crypto_prices,
+        "metals": metals_prices,
         "total": total,
         "weekend_mode": is_weekend,
     }
