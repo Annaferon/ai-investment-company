@@ -11,6 +11,7 @@ log = get_logger("news_fetcher")
 
 # Источники новостей (RSS)
 NEWS_SOURCES = [
+    # РБК
     {
         "name": "RBC Economics",
         "url": "https://rssexport.rbc.ru/rbcnews/economics/20/full.rss",
@@ -26,10 +27,35 @@ NEWS_SOURCES = [
         "url": "https://rssexport.rbc.ru/rbcnews/news/20/full.rss",
         "category": "general",
     },
+    # ЦБ РФ
     {
         "name": "Bank of Russia",
         "url": "https://www.cbr.ru/rss/eventrss",
         "category": "cb",
+    },
+    # ТАСС
+    {
+        "name": "TASS",
+        "url": "https://tass.ru/rss/v2.xml",
+        "category": "general",
+    },
+    # Интерфакс
+    {
+        "name": "Interfax",
+        "url": "https://www.interfax.ru/rss.asp",
+        "category": "general",
+    },
+    # Коммерсант
+    {
+        "name": "Kommersant",
+        "url": "https://www.kommersant.ru/RSS/news.xml",
+        "category": "general",
+    },
+    # Лента.ру
+    {
+        "name": "Lenta",
+        "url": "https://lenta.ru/rss/news",
+        "category": "general",
     },
 ]
 
@@ -70,7 +96,7 @@ def fetch_recent_news(hours: int = 24, max_per_source: int = 10) -> list[dict[st
     return all_news
 
 
-def news_to_text(news: list[dict[str, Any]], max_items: int = 40) -> str:
+def news_to_text(news: list[dict[str, Any]], max_items: int = 60) -> str:
     """Превращаем список новостей в текст для LLM."""
     if not news:
         return "Новостей за последние 24 часа не найдено."
