@@ -12,13 +12,18 @@ from src.risk.risk_manager import risk_manager
 SYSTEM_PROMPT = """Ты — профессиональный трейдер виртуальной инвестиционной компании.
 Твоя задача: на основе рыночных цен, портфеля и ОТЧЁТОВ АНАЛИТИКОВ предложить ОДНО действие.
 
+ВАЖНО ПРО РЕЖИМ РАБОТЫ БИРЖ:
+- Акции РФ (MOEX): торгуются Пн–Пт 07:00–23:50 МСК. В выходные — закрыты.
+- Металлы (через MOEX): торгуются Пн–Пт. В выходные — закрыты.
+- КРИПТА (BTC, ETH, SOL, BNB): торгуется КРУГЛОСУТОЧНО 7 дней в неделю.
+  В выходные крипта ДОСТУПНА для торговли!
+
 Правила:
-- Активы: акции РФ (MOEX), криптовалюты, драгметаллы.
 - Все цены — в рублях.
 - Комиссия брокера: 0.05%.
 - Не рискуй более 20% капитала в одной сделке (Risk Manager проверит и скорректирует).
 - При негативном новостном фоне — осторожнее с покупками.
-- При bearish-тренде — не покупай. Sideways — умеренно. Bullish — можно активнее.
+- При bearish-тренде — не покупай акции. Но крипту — можно, если есть сигнал.
 - Если хочешь остаться в деньгах — ticker "CASH", action "HOLD".
 
 Если есть отчёты аналитиков (Stock, Crypto, Metals) — учитывай их оценки (score 0-10 и sentiment):
@@ -26,13 +31,15 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 - score 4-7 — нейтральный
 - score < 4 — избегай
 
+Если в выходной видишь сильный сигнал по крипте (score >= 7) — можешь купить.
+
 Отвечай СТРОГО в формате JSON:
 {
-  "ticker": "SBER" | "GAZP" | "BTC" | "ETH" | "GOLD" | "CASH",
+  "ticker": "SBER" | "GAZP" | "BTC" | "ETH" | "SOL" | "BNB" | "GOLD" | "CASH",
   "action": "BUY" | "SELL" | "HOLD",
   "quantity": 5,
   "confidence": 0.0-1.0,
-  "reasoning": "объяснение на русском, 1-2 предложения"
+  "reasoning": "объяснение на русском, 2-4 предложения"
 }
 """
 
@@ -110,7 +117,7 @@ class Trader(BaseAgent):
         if stocks:
             lines = ["АКЦИИ РФ:"]
             for s in stocks:
-                lines.append(f"  • {s['ticker']}: {s['sentiment']} (score {s['score']}) — {s['reasoning'][:100]}")
+                lines.append(f"  • {s['ticker']}: {s['sentiment']} (score {s['score']}) — {s['reasoning']}")
             blocks.append("\n".join(lines))
 
         cryptos = db.fetch_all(
@@ -122,7 +129,7 @@ class Trader(BaseAgent):
         if cryptos:
             lines = ["КРИПТОВАЛЮТЫ:"]
             for c in cryptos:
-                lines.append(f"  • {c['ticker']}: {c['sentiment']} (score {c['score']}) — {c['reasoning'][:100]}")
+                lines.append(f"  • {c['ticker']}: {c['sentiment']} (score {c['score']}) — {c['reasoning']}")
             blocks.append("\n".join(lines))
 
         metals = db.fetch_all(
@@ -134,7 +141,7 @@ class Trader(BaseAgent):
         if metals:
             lines = ["ДРАГМЕТАЛЛЫ:"]
             for m in metals:
-                lines.append(f"  • {m['ticker']}: {m['sentiment']} (score {m['score']}) — {m['reasoning'][:100]}")
+                lines.append(f"  • {m['ticker']}: {m['sentiment']} (score {m['score']}) — {m['reasoning']}")
             blocks.append("\n".join(lines))
 
         if not blocks:
@@ -170,7 +177,10 @@ Sentiment: {news['sentiment']}
 
         weekend_hint = ""
         if datetime.now().weekday() >= 5:
-            weekend_hint = "\nВАЖНО: Сегодня выходной. MOEX закрыт — акции РФ и металлы не торгуются. Можно торговать только криптой (BTC, ETH) или оставаться в CASH."
+            weekend_hint = (
+                "\nВАЖНО: Сегодня выходной. MOEX закрыт — акции РФ и металлы не торгуются. "
+                "КРИПТА (BTC, ETH, SOL, BNB) ДОСТУПНА для торговли, если есть сильный сигнал."
+            )
 
         prompt = f"""Текущие цены (в рублях):
 {json.dumps(prices, ensure_ascii=False, indent=2, default=float)}
@@ -255,7 +265,6 @@ Sentiment: {news['sentiment']}
             self.log.info("Остаёмся в кэше — сделки нет")
             return {**decision, "execution": {"executed": False, "reason": "cash_hold"}}
 
-        # Свежая цена
         prices = self.get_market_prices()
         decision["price"] = prices.get(ticker, 0)
 
@@ -263,7 +272,7 @@ Sentiment: {news['sentiment']}
             self.log.warning(f"Нет цены для {ticker} — сделку не исполняем")
             return {**decision, "execution": {"executed": False, "reason": "no_price"}}
 
-        # === Risk Manager ===
+        # Risk Manager
         checked = risk_manager.check(decision)
         risk_status = checked.get("risk_check", {}).get("status")
 
@@ -272,7 +281,6 @@ Sentiment: {news['sentiment']}
             self.log.warning(f"Risk Manager отклонил: {reason}")
             return {**checked, "execution": {"executed": False, "reason": "risk_rejected", "detail": reason}}
 
-        # Исполняем скорректированное решение
         execution = broker.execute(checked)
         self.log.info(f"Брокер: {execution}")
 
