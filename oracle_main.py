@@ -8,6 +8,16 @@ from src.core.notifier import notify
 from src.oracle.market_data_fetcher import run_oracle
 
 
+def _format_prices(prices: dict[str, float], emoji: str, title: str) -> str:
+    """Красиво форматируем цены для Telegram."""
+    if not prices:
+        return f"{emoji} {title}: нет данных"
+    lines = [f"{emoji} *{title}*"]
+    for ticker, price in sorted(prices.items()):
+        lines.append(f"  • {ticker}: {price:,.2f}")
+    return "\n".join(lines)
+
+
 def main() -> int:
     logger.info("=" * 60)
     logger.info("Oracle запускается...")
@@ -32,18 +42,17 @@ def main() -> int:
         notify("🔮 ORACLE", f"❌ Оракул упал: {e}")
         return 1
 
-    # Формируем тело уведомления
-    body = (
-        f"📊 Получено цен:\n"
-        f"• MOEX (акции): {result.get('moex', 0)}\n"
-        f"• CoinGecko (крипта): {result.get('crypto', 0)}\n"
-        f"• ЦБ (металлы + USD/RUB): {result.get('metals', 0)}\n"
-        f"\n*Всего: {result.get('total', 0)}*"
-    )
-    if result.get("weekend_mode"):
-        body += "\n\n🏖 Выходной режим (MOEX закрыт)"
+    # Формируем красивое сообщение с ценами
+    parts = []
+    parts.append(_format_prices(result.get("moex", {}), "📈", "Акции MOEX (₽)"))
+    parts.append(_format_prices(result.get("crypto", {}), "₿", "Крипта (USD)"))
+    parts.append(_format_prices(result.get("metals", {}), "🥇", "Металлы + курс"))
+    parts.append(f"\n*Всего: {result.get('total', 0)} цен*")
 
-    notify("🔮 ORACLE", body)
+    if result.get("weekend_mode"):
+        parts.append("🏖 Выходной режим (MOEX закрыт)")
+
+    notify("🔮 ORACLE", "\n\n".join(parts))
 
     logger.info("=" * 60)
     logger.info(f"Результат: {result}")
