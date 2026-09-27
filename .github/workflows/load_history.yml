@@ -2,13 +2,20 @@ name: Load Price History
 
 on:
   schedule:
-    # Воскресенье, 03:00 UTC = 06:00 МСК
+    # Воскресенье, 06:00 МСК (03:00 UTC) — инкремент 7 дней
     - cron: '0 3 * * 0'
   workflow_dispatch:
+    inputs:
+      history_days:
+        description: 'Дней истории (по умолчанию 7; для полной — 1460)'
+        required: false
+        default: '7'
+        type: string
 
 jobs:
   load-history:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -28,4 +35,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DEBUG_NOTIFY: ${{ secrets.DEBUG_NOTIFY }}
+          HISTORY_DAYS: ${{ github.event.inputs.history_days || '7' }}
         run: python history_main.py
