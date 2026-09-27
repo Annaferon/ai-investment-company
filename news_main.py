@@ -34,12 +34,12 @@ def main() -> int:
         sentiment = result.get("sentiment", "?")
         emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(sentiment, "⚪")
         events = result.get("key_events", [])
-        events_text = "\n".join(f"  • {e.get('title', '?')}" for e in events[:5])
+        events_text = "\n".join(f"  • {e.get('title', '?')}" for e in events[:7])
 
         body = (
             f"{emoji} Sentiment: {sentiment}\n"
             f"Уверенность: {result.get('confidence', '?')}\n\n"
-            f"📌 Вывод: {result.get('summary', '')[:300]}\n\n"
+            f"📌 Вывод:\n{result.get('summary', '')}\n\n"
             f"🔑 События:\n{events_text}"
         )
         notify("📰 NEWS-01", body)
