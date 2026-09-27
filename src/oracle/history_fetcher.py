@@ -1,29 +1,26 @@
-"""Загрузка истории цен: CoinPaprika (крипта) + MOEX (акции).
-CoinPaprika — бесплатно, без ключа, 1 год истории за запрос."""
+"""Загрузка истории цен: Yahoo Finance (крипта) + MOEX (акции)."""
 from datetime import datetime, timedelta
 from typing import Any
 
 import requests
+import yfinance as yf
 
 from src.core.logger import get_logger
 
 log = get_logger("history_fetcher")
 
-# --- CoinPaprika (крипта) ---
-COINPAPRIKA_BASE = "https://api.coinpaprika.com/v1"
-CRYPTO_IDS = {
-    # Stable
-    "BTC": "btc-bitcoin",
-    "ETH": "eth-ethereum",
-    "SOL": "sol-solana",
-    "BNB": "bnb-binance-coin",
-    "LINK": "link-chainlink",
-    # Meme
-    "DOGE": "doge-dogecoin",
-    "SHIB": "shib-shiba-inu",
-    "PEPE": "pepe-pepe",
-    "WIF": "wif-dogwifcoin",
-    "BONK": "bonk-bonk",
+# --- Yahoo Finance (крипта) ---
+CRYPTO_YF = {
+    "BTC": "BTC-USD",
+    "ETH": "ETH-USD",
+    "SOL": "SOL-USD",
+    "BNB": "BNB-USD",
+    "LINK": "LINK-USD",
+    "DOGE": "DOGE-USD",
+    "SHIB": "SHIB-USD",
+    "PEPE": "PEPE24478-USD",
+    "WIF": "WIF-USD",
+    "BONK": "BONK-USD",
 }
 
 # --- MOEX ---
@@ -36,55 +33,45 @@ MOEX_TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "ROSN",
 
 CRYPTO_DAYS_FULL = 365
 STOCK_DAYS_FULL = 1095
-
 TIMEOUT_SEC = 30
 
 
-# ---------- CoinPaprika ----------
+# ---------- Yahoo Finance (крипта) ----------
 
-def fetch_coinpaprika_history(coin_id: str, days: int) -> list[dict]:
-    """История цен монеты с CoinPaprika (в USD)."""
-    end = datetime.now()
-    start = end - timedelta(days=min(days, 365))
-
-    url = f"{COINPAPRIKA_BASE}/tickers/{coin_id}/historical"
+def fetch_yf_history(yf_ticker: str, days: int) -> list[dict]:
+    """История с Yahoo Finance."""
     try:
-        r = requests.get(
-            url,
-            params={"start": start.strftime("%Y-%m-%d"), "interval": "1d"},
-            timeout=TIMEOUT_SEC,
-        )
-        r.raise_for_status()
-        data = r.json()
+        ticker = yf.Ticker(yf_ticker)
+        df = ticker.history(period=f"{days}d", interval="1d")
+        if df.empty:
+            log.warning(f"Yahoo {yf_ticker}: пусто")
+            return []
+
+        result = []
+        for idx, row in df.iterrows():
+            try:
+                price = float(row["Close"])
+                if price > 0:
+                    result.append({
+                        "date": idx.date().isoformat(),
+                        "price": price,
+                    })
+            except Exception:
+                continue
+
+        log.info(f"Yahoo {yf_ticker}: {len(result)} точек")
+        return result
     except Exception as e:
-        log.error(f"CoinPaprika {coin_id}: {e}")
+        log.error(f"Yahoo {yf_ticker}: {e}")
         return []
-
-    if not isinstance(data, list):
-        log.warning(f"CoinPaprika {coin_id}: неожиданный формат")
-        return []
-
-    result = []
-    for p in data:
-        try:
-            ts = p.get("timestamp", "")
-            price = p.get("price")
-            if ts and price:
-                date_str = ts[:10]
-                result.append({"date": date_str, "price": float(price)})
-        except Exception:
-            continue
-
-    log.info(f"CoinPaprika {coin_id}: {len(result)} точек")
-    return result
 
 
 def load_crypto_history(days: int) -> int:
     total = 0
-    for ticker, cp_id in CRYPTO_IDS.items():
-        records = fetch_coinpaprika_history(cp_id, days)
+    for ticker, yf_ticker in CRYPTO_YF.items():
+        records = fetch_yf_history(yf_ticker, min(days, CRYPTO_DAYS_FULL))
         if records:
-            saved = save_history(records, ticker, "crypto", "USD", "coinpaprika")
+            saved = save_history(records, ticker, "crypto", "USD", "yahoo")
             total += saved
     return total
 
@@ -121,7 +108,6 @@ def fetch_moex_history(ticker: str, days: int) -> list[dict]:
 
         cols = data.get("history", {}).get("columns", [])
         rows = data.get("history", {}).get("data", [])
-
         if not rows:
             break
 
