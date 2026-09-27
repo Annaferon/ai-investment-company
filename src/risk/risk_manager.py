@@ -19,11 +19,11 @@ MAX_DATA_AGE_HOURS = 6
 MAX_CRYPTO_POSITIONS = 5
 MAX_STOCK_POSITIONS = 3
 
-# Точность округления для разных активов
+# Точность округления
 PRECISION = {
-    "crypto": 8,    # BTC и др. — до 8 знаков
-    "stock": 0,     # акции — целые
-    "metal": 2,     # металлы — граммы с копейками
+    "crypto": 8,
+    "stock": 0,
+    "metal": 2,
 }
 
 
@@ -56,15 +56,16 @@ class RiskManager:
             (ticker,),
         )
 
-    def _get_fresh_price(self, ticker: str) -> float | None:
+    def _has_fresh_price(self, ticker: str) -> bool:
+        """Проверяем ТОЛЬКО свежесть — цену не возвращаем."""
         cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
         row = db.fetch_one(
-            """SELECT price FROM market_prices
+            """SELECT id FROM market_prices
                WHERE ticker = %s AND updated_at >= %s
-               ORDER BY updated_at DESC LIMIT 1;""",
+               LIMIT 1;""",
             (ticker, cutoff),
         )
-        return float(row["price"]) if row else None
+        return row is not None
 
     def _get_asset_type(self, ticker: str) -> str:
         row = db.fetch_one(
@@ -75,7 +76,6 @@ class RiskManager:
         return row["asset_type"] if row else "stock"
 
     def _round_quantity(self, quantity: float, asset_type: str) -> float:
-        """Округляем количество согласно типу актива."""
         digits = PRECISION.get(asset_type, 0)
         return round(quantity, digits)
 
@@ -103,64 +103,69 @@ class RiskManager:
         ticker = str(decision.get("ticker", "")).upper()
         action = str(decision.get("action", "HOLD")).upper()
         quantity = float(decision.get("quantity", 0) or 0)
+        # ВАЖНО: цена уже в рублях, конвертацию сделал Trader
         price = float(decision.get("price", 0) or 0)
 
         if ticker == "CASH" or action == "HOLD":
             return {**decision, "risk_check": {"status": "skipped"}}
 
-        # 1. Свежесть цены
-        fresh = self._get_fresh_price(ticker)
-        if not fresh or fresh <= 0:
+        # 1. Свежесть данных
+        if not self._has_fresh_price(ticker):
             return self._reject(decision, "no_fresh_price", ["fresh_data"])
 
-        price = fresh
+        # 2. Цена должна быть передана Trader
+        if price <= 0:
+            return self._reject(decision, "no_price_from_trader", ["missing_price"])
+
         asset_type = self._get_asset_type(ticker)
         rules: list[str] = []
 
-        # 2. BUY
+        # 3. BUY
         if action == "BUY":
             cash = self._get_cash()
             max_cost = cash * MAX_POSITION_PCT
             max_qty_raw = max_cost / price
             max_qty = self._round_quantity(max_qty_raw, asset_type)
 
-            # Если Trader не указал quantity — используем максимум
+            # Если Trader не указал quantity — авто из лимита
             if quantity <= 0:
                 quantity = max_qty
                 rules.append(f"auto_quantity ({quantity})")
                 log.info(f"BUY {ticker}: quantity=0 → авто {quantity}")
 
-            # Если больше лимита — обрезаем
+            # Обрезаем по лимиту
             if quantity > max_qty:
                 new_qty = max_qty
                 rules.append(f"position_size_20% ({quantity}→{new_qty})")
                 quantity = new_qty
                 log.info(f"BUY {ticker}: скорректировано до {quantity}")
 
-            # Пересчитываем стоимость
+            # Пересчёт стоимости
             cost = quantity * price
 
-            # Если меньше минимума — округляем вверх или отклоняем
+            # Минимальный размер
             if cost < MIN_TRADE_SIZE:
-                # Пробуем округлить вверх, чтобы дойти до минимума
                 min_qty = self._round_quantity(MIN_TRADE_SIZE / price, asset_type)
+                # Округляем вверх чтобы дойти до минимума
+                if min_qty * price < MIN_TRADE_SIZE:
+                    digits = PRECISION.get(asset_type, 0)
+                    min_qty = round(MIN_TRADE_SIZE / price + 10**(-digits), digits)
+
                 if min_qty > max_qty:
                     return self._reject(
                         decision,
-                        f"минимум {MIN_TRADE_SIZE}₽ не влезает в лимит 20% ({max_cost:.0f}₽)",
+                        f"минимум {MIN_TRADE_SIZE}₽ не влезает в 20% ({max_cost:.0f}₽)",
                         ["min_trade_size"],
                     )
                 quantity = min_qty
                 rules.append(f"min_trade_size ({quantity})")
 
             if quantity <= 0:
-                return self._reject(
-                    decision, f"quantity=0 после расчёта", ["zero_quantity"],
-                )
+                return self._reject(decision, "quantity=0 после расчёта", ["zero_quantity"])
 
             decision = {**decision, "quantity": quantity, "price": price}
 
-            # Проверка классов
+            # Лимиты классов
             by_type = self._get_portfolio_by_type()
             existing = {p["ticker"] for p in by_type.get(asset_type, [])}
 
@@ -177,7 +182,7 @@ class RiskManager:
                 was_adjusted=was_adjusted,
             )
 
-        # 3. SELL
+        # 4. SELL
         if action == "SELL":
             pos = self._get_position(ticker)
             if not pos:
@@ -185,7 +190,6 @@ class RiskManager:
 
             pos_qty = float(pos["quantity"])
 
-            # Если quantity=0 или больше позиции — продаём всё
             if quantity <= 0 or quantity > pos_qty:
                 quantity = pos_qty
                 rules.append(f"auto_sell_all ({quantity})")
