@@ -2,8 +2,7 @@ name: Run Crypto Analyst
 
 on:
   schedule:
-    # 12:10 МСК = 09:10 UTC — ежедневно (крипта 24/7)
-    - cron: '10 9 * * *'
+    - cron: '10 11 * * *'
   workflow_dispatch:
 
 jobs:
@@ -25,4 +24,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DEBUG_NOTIFY: ${{ secrets.DEBUG_NOTIFY }}
         run: python crypto_main.py
