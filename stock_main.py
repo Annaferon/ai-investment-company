@@ -34,7 +34,6 @@ def main() -> int:
     elif "error" in result:
         notify("📈 STOCK-01", f"❌ Ошибка: {result['error']}")
     else:
-        # Получим свежие отчёты
         reports = db.fetch_all(
             """SELECT ticker, sentiment, score, reasoning
                FROM stock_reports
@@ -47,7 +46,7 @@ def main() -> int:
                 emoji = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}.get(r["sentiment"], "⚪")
                 lines.append(
                     f"{emoji} {r['ticker']}: {r['sentiment']} (score {r['score']})\n"
-                    f"   {r['reasoning'][:120]}"
+                    f"{r['reasoning']}"
                 )
             notify("📈 STOCK-01", "\n\n".join(lines))
         else:
