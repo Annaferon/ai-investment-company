@@ -2,10 +2,7 @@ name: Run News Analyst
 
 on:
   schedule:
-    # 04:00 МСК = 01:00 UTC — к 10:00 МСК
-    - cron: '0 1 * * *'
-    # 12:00 МСК = 09:00 UTC — к 18:00 МСК
-    - cron: '0 9 * * *'
+    - cron: '0 11 * * *'
   workflow_dispatch:
 
 jobs:
@@ -27,4 +24,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DEBUG_NOTIFY: ${{ secrets.DEBUG_NOTIFY }}
         run: python news_main.py
