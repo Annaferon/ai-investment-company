@@ -37,14 +37,14 @@ def main() -> int:
         movers = result.get("key_movers", [])
         movers_text = "\n".join(
             f"  • {m.get('ticker', '?')}: {m.get('change_pct', 0):+.2f}%"
-            for m in movers[:5]
+            for m in movers[:7]
         )
 
         body = (
             f"{trend_emoji} Тренд: {trend}\n"
             f"Волатильность: {vol}\n"
             f"Уверенность: {result.get('confidence', '?')}\n\n"
-            f"📌 Вывод: {result.get('summary', '')[:300]}\n\n"
+            f"📌 Вывод:\n{result.get('summary', '')}\n\n"
             f"🔥 Движения:\n{movers_text}"
         )
         notify("📊 MARKET-01", body)
