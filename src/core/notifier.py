@@ -20,12 +20,11 @@ def _is_debug_enabled() -> bool:
 
 
 def _now_msk() -> str:
-    """Текущее время в МСК (не UTC)."""
     return datetime.now(MSK).strftime("%H:%M МСК")
 
 
 def notify(title: str, body: str, force: bool = False) -> bool:
-    """Отправить сообщение в Telegram."""
+    """Отправить сообщение в Telegram (без Markdown — чтобы не падало)."""
     if not force and not _is_debug_enabled():
         log.debug(f"DEBUG_NOTIFY=0, пропускаем: {title}")
         return False
@@ -37,7 +36,7 @@ def notify(title: str, body: str, force: bool = False) -> bool:
         log.warning("TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы")
         return False
 
-    text = f"*{title}* — {_now_msk()}\n\n{body}"
+    text = f"{title} — {_now_msk()}\n\n{body}"
 
     try:
         resp = requests.post(
@@ -45,12 +44,13 @@ def notify(title: str, body: str, force: bool = False) -> bool:
             json={
                 "chat_id": chat_id,
                 "text": text,
-                "parse_mode": "Markdown",
                 "disable_web_page_preview": True,
             },
             timeout=30,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            log.error(f"Telegram {resp.status_code}: {resp.text[:200]}")
+            return False
         log.info(f"Notifier отправил: {title}")
         return True
     except Exception as e:
