@@ -2,8 +2,7 @@ name: Run Market Analyst
 
 on:
   schedule:
-    # 12:15 МСК = 09:15 UTC — к 18:15 МСК
-    - cron: '15 9 * * *'
+    - cron: '15 11 * * *'
   workflow_dispatch:
 
 jobs:
@@ -25,4 +24,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DEBUG_NOTIFY: ${{ secrets.DEBUG_NOTIFY }}
         run: python market_main.py
