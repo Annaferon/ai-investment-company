@@ -1,5 +1,5 @@
 """Загрузка истории цен: CoinPaprika (крипта) + MOEX (акции).
-CoinPaprika — бесплатно, без ключа, годовая история за один запрос."""
+CoinPaprika — бесплатно, без ключа, 1 год истории за запрос."""
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -12,10 +12,18 @@ log = get_logger("history_fetcher")
 # --- CoinPaprika (крипта) ---
 COINPAPRIKA_BASE = "https://api.coinpaprika.com/v1"
 CRYPTO_IDS = {
+    # Stable
     "BTC": "btc-bitcoin",
     "ETH": "eth-ethereum",
     "SOL": "sol-solana",
     "BNB": "bnb-binance-coin",
+    "LINK": "link-chainlink",
+    # Meme
+    "DOGE": "doge-dogecoin",
+    "SHIB": "shib-shiba-inu",
+    "PEPE": "pepe-pepe",
+    "WIF": "wif-dogwifcoin",
+    "BONK": "bonk-bonk",
 }
 
 # --- MOEX ---
@@ -26,14 +34,13 @@ MOEX_HISTORY_URL = (
 MOEX_TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "ROSN",
                 "NVTK", "TATN", "SNGS", "PLZL", "MTSS"]
 
-# Периоды
-CRYPTO_DAYS_FULL = 365    # CoinPaprika free = 1 год
-STOCK_DAYS_FULL = 1095    # 3 года
+CRYPTO_DAYS_FULL = 365
+STOCK_DAYS_FULL = 1095
 
 TIMEOUT_SEC = 30
 
 
-# ---------- CoinPaprika (крипта) ----------
+# ---------- CoinPaprika ----------
 
 def fetch_coinpaprika_history(coin_id: str, days: int) -> list[dict]:
     """История цен монеты с CoinPaprika (в USD)."""
@@ -68,7 +75,7 @@ def fetch_coinpaprika_history(coin_id: str, days: int) -> list[dict]:
         except Exception:
             continue
 
-    log.info(f"CoinPaprika {coin_id}: {len(result)} точек за {days} дней")
+    log.info(f"CoinPaprika {coin_id}: {len(result)} точек")
     return result
 
 
@@ -82,7 +89,7 @@ def load_crypto_history(days: int) -> int:
     return total
 
 
-# ---------- MOEX (акции) ----------
+# ---------- MOEX ----------
 
 def fetch_moex_history(ticker: str, days: int) -> list[dict]:
     to_date = datetime.now().date()
@@ -137,7 +144,7 @@ def fetch_moex_history(ticker: str, days: int) -> list[dict]:
         start += page_size
 
     out = [{"date": d, "price": p} for d, p in sorted(result.items())]
-    log.info(f"MOEX {ticker}: {len(out)} точек за {days} дней")
+    log.info(f"MOEX {ticker}: {len(out)} точек")
     return out
 
 
