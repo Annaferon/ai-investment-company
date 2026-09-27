@@ -1,4 +1,4 @@
-"""Виртуальный брокер: исполняет решения Trader."""
+"""Виртуальный брокер: исполняет решения Trader. Поддерживает дробные количества."""
 from typing import Any, Optional
 
 from src.core.config import config
@@ -8,15 +8,12 @@ from src.core.logger import get_logger
 log = get_logger("broker")
 
 
-# Какие активы к какой группе относим
 ASSET_TYPES = {
-    "SBER": "stock",
-    "GAZP": "stock",
-    "LKOH": "stock",
-    "BTC": "crypto",
-    "ETH": "crypto",
-    "GOLD": "metal",
-    "SILVER": "metal",
+    "SBER": "stock", "GAZP": "stock", "LKOH": "stock",
+    "GMKN": "stock", "ROSN": "stock", "NVTK": "stock",
+    "TATN": "stock", "SNGS": "stock", "PLZL": "stock", "MTSS": "stock",
+    "BTC": "crypto", "ETH": "crypto", "SOL": "crypto", "BNB": "crypto",
+    "GOLD": "metal", "SILVER": "metal",
 }
 
 
@@ -24,11 +21,10 @@ class VirtualBroker:
     """Исполняет торговые решения на виртуальном рынке."""
 
     def execute(self, decision: dict[str, Any]) -> dict[str, Any]:
-        """Принимает решение Trader и исполняет его."""
         action = str(decision.get("action", "HOLD")).upper()
         ticker = str(decision.get("ticker", "")).upper()
-        quantity = int(decision.get("quantity", 0))
-        price = float(decision.get("price", 0))
+        quantity = float(decision.get("quantity", 0) or 0)
+        price = float(decision.get("price", 0) or 0)
 
         if action == "HOLD" or not ticker or quantity <= 0:
             log.info("HOLD / пустое решение — ничего не делаем")
@@ -53,7 +49,6 @@ class VirtualBroker:
         return float(row["cash"]) if row else 0.0
 
     def _update_cash(self, delta: float) -> None:
-        """delta < 0 — списываем, delta > 0 — пополняем."""
         db.execute(
             "UPDATE account SET cash = cash + %s, updated_at = NOW() WHERE id = 1;",
             (delta,),
@@ -70,7 +65,7 @@ class VirtualBroker:
 
     # ---------- Покупка ----------
 
-    def _buy(self, ticker: str, quantity: int, price: float) -> dict:
+    def _buy(self, ticker: str, quantity: float, price: float) -> dict:
         total = quantity * price
         commission = total * config.BROKER_COMMISSION
         cost = total + commission
@@ -83,7 +78,6 @@ class VirtualBroker:
             )
             return {"executed": False, "reason": "insufficient_funds"}
 
-        # 1. Сделка
         db.execute(
             """INSERT INTO trades
                (agent_name, ticker, asset_type, action, quantity, price, total, commission)
@@ -92,13 +86,12 @@ class VirtualBroker:
              quantity, price, total, commission),
         )
 
-        # 2. Портфель (усредняем цену)
         position = self._get_position(ticker)
         if position:
             old_qty = float(position["quantity"])
             old_avg = float(position["avg_price"])
             new_qty = old_qty + quantity
-            new_avg = (old_qty * old_avg + quantity * price) / new_qty
+            new_avg = (old_qty * old_avg + quantity * price) / new_qty if new_qty > 0 else 0
             db.execute(
                 """UPDATE portfolio
                    SET quantity = %s, avg_price = %s, updated_at = NOW()
@@ -112,7 +105,6 @@ class VirtualBroker:
                 (ticker, self._asset_type(ticker), quantity, price),
             )
 
-        # 3. Деньги
         self._update_cash(-cost)
 
         log.info(
@@ -131,10 +123,10 @@ class VirtualBroker:
 
     # ---------- Продажа ----------
 
-    def _sell(self, ticker: str, quantity: int, price: float) -> dict:
+    def _sell(self, ticker: str, quantity: float, price: float) -> dict:
         position = self._get_position(ticker)
         if not position or float(position["quantity"]) < quantity:
-            log.warning(f"SELL {ticker}: недостаточно актива в портфеле")
+            log.warning(f"SELL {ticker}: недостаточно актива")
             return {"executed": False, "reason": "insufficient_position"}
 
         total = quantity * price
@@ -151,7 +143,7 @@ class VirtualBroker:
 
         old_qty = float(position["quantity"])
         new_qty = old_qty - quantity
-        if new_qty <= 0:
+        if new_qty <= 0.00000001:
             db.execute("DELETE FROM portfolio WHERE ticker = %s;", (ticker,))
         else:
             db.execute(
