@@ -1,5 +1,5 @@
 """Оракул: сбор рыночных данных с MOEX, CoinGecko, ЦБ РФ.
-Крипта — 24/7 (10 монет). MOEX/ЦБ — только в рабочие часы Пн-Пт."""
+Возвращает цены + % изменения к предыдущему запросу."""
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -10,7 +10,6 @@ from src.core.logger import get_logger
 
 log = get_logger("oracle")
 
-# МСК = UTC+3
 MSK = timezone(timedelta(hours=3))
 
 # --- MOEX ---
@@ -21,13 +20,11 @@ MOEX_TICKERS = {"SBER", "GAZP", "LKOH", "GMKN", "ROSN", "NVTK", "TATN", "SNGS", 
 # --- CoinGecko (крипта) ---
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 CRYPTO_IDS = {
-    # Stable
     "BTC": "bitcoin",
     "ETH": "ethereum",
     "SOL": "solana",
     "BNB": "binancecoin",
     "LINK": "chainlink",
-    # Meme
     "DOGE": "dogecoin",
     "SHIB": "shiba-inu",
     "PEPE": "pepe",
@@ -84,6 +81,32 @@ def _retry(func, *args, **kwargs):
     return None
 
 
+# ---------- Предыдущие цены ----------
+
+def get_previous_prices() -> dict[str, float]:
+    """Предыдущие цены из БД (последнее значение для каждого тикера)."""
+    from src.core.database import db
+    rows = db.fetch_all(
+        """SELECT DISTINCT ON (ticker) ticker, price
+           FROM market_prices
+           ORDER BY ticker, updated_at DESC;"""
+    )
+    return {r["ticker"]: float(r["price"]) for r in rows}
+
+
+def calc_changes(
+    new_prices: dict[str, float],
+    old_prices: dict[str, float],
+) -> dict[str, float]:
+    """% изменения новой цены к предыдущей."""
+    changes = {}
+    for ticker, new_price in new_prices.items():
+        old = old_prices.get(ticker)
+        if old and old > 0:
+            changes[ticker] = (new_price - old) / old * 100
+    return changes
+
+
 # ---------- MOEX ----------
 
 def fetch_moex_bulk() -> dict[str, float]:
@@ -135,10 +158,9 @@ def fetch_moex_bulk() -> dict[str, float]:
     return prices
 
 
-# ---------- CoinGecko (10 монет) ----------
+# ---------- CoinGecko ----------
 
 def fetch_crypto_prices() -> dict[str, float]:
-    """Цены 10 монет через CoinGecko (один запрос)."""
     ids = ",".join(CRYPTO_IDS.values())
     url = f"{COINGECKO_BASE}/simple/price"
     try:
@@ -219,6 +241,10 @@ def run_oracle() -> dict[str, Any]:
     is_weekend = _is_weekend()
     moex_open = _is_moex_open()
 
+    # 1. Запоминаем предыдущие цены ДО сохранения новых
+    old_prices = get_previous_prices()
+
+    # 2. Получаем новые цены
     if moex_open:
         moex_prices = fetch_moex_bulk()
     else:
@@ -231,6 +257,11 @@ def run_oracle() -> dict[str, Any]:
     if not moex_prices and not crypto_prices and not metals_prices:
         raise RuntimeError("Оракул не смог получить ни одной цены")
 
+    # 3. Считаем % изменения
+    all_new = {**moex_prices, **crypto_prices, **metals_prices}
+    changes = calc_changes(all_new, old_prices)
+
+    # 4. Сохраняем в БД
     save_prices_to_db(moex_prices, asset_type="stock", source="moex")
     save_prices_to_db(crypto_prices, asset_type="crypto", source="coingecko")
     save_prices_to_db(metals_prices, asset_type="metal", source="cbr")
@@ -242,6 +273,7 @@ def run_oracle() -> dict[str, Any]:
         "moex": moex_prices,
         "crypto": crypto_prices,
         "metals": metals_prices,
+        "changes": changes,
         "total": total,
         "weekend_mode": is_weekend,
         "moex_open": moex_open,
