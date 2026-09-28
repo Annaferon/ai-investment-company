@@ -1,4 +1,4 @@
-"""Запуск Оракула. Уведомление в Telegram при каждом запуске."""
+"""Запуск Оракула с % изменения цен."""
 import sys
 
 from src.core.config import config
@@ -19,12 +19,29 @@ def _fmt_price(price: float) -> str:
     return f"{price:.10f}"
 
 
-def _format_prices(prices: dict[str, float], emoji: str, title: str) -> str:
+def _fmt_change(change: float | None) -> str:
+    """Форматируем % изменения со стрелкой."""
+    if change is None:
+        return ""
+    if abs(change) < 0.01:
+        return " ➖ 0.00%"
+    if change > 0:
+        return f" 📈 +{change:.2f}%"
+    return f" 📉 {change:.2f}%"
+
+
+def _format_prices(
+    prices: dict[str, float],
+    changes: dict[str, float],
+    emoji: str,
+    title: str,
+) -> str:
     if not prices:
         return f"{emoji} {title}: нет данных"
     lines = [f"{emoji} {title}"]
     for ticker, price in sorted(prices.items()):
-        lines.append(f"  • {ticker}: {_fmt_price(price)}")
+        change_str = _fmt_change(changes.get(ticker))
+        lines.append(f"  • {ticker}: {_fmt_price(price)}{change_str}")
     return "\n".join(lines)
 
 
@@ -52,10 +69,12 @@ def main() -> int:
         notify("🔮 ORACLE", f"❌ Оракул упал: {e}", force=True)
         return 1
 
+    changes = result.get("changes", {})
+
     parts = []
-    parts.append(_format_prices(result.get("moex", {}), "📈", "Акции MOEX (₽)"))
-    parts.append(_format_prices(result.get("crypto", {}), "₿", "Крипта (USD)"))
-    parts.append(_format_prices(result.get("metals", {}), "🥇", "Металлы + курс"))
+    parts.append(_format_prices(result.get("moex", {}), changes, "📈", "Акции MOEX (₽)"))
+    parts.append(_format_prices(result.get("crypto", {}), changes, "₿", "Крипта (USD)"))
+    parts.append(_format_prices(result.get("metals", {}), changes, "🥇", "Металлы + курс"))
     parts.append(f"Всего: {result.get('total', 0)} цен")
 
     if not result.get("moex_open"):
