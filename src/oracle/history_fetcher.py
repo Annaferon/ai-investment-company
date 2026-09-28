@@ -1,26 +1,27 @@
-"""Загрузка истории цен: Yahoo Finance (крипта) + MOEX (акции)."""
+"""Загрузка истории цен: Kraken (крипта) + MOEX (акции).
+Kraken — публичный API, без ключа, ~720 дневных свечей (~2 года)."""
 from datetime import datetime, timedelta
 from typing import Any
 
 import requests
-import yfinance as yf
 
 from src.core.logger import get_logger
 
 log = get_logger("history_fetcher")
 
-# --- Yahoo Finance (крипта) ---
-CRYPTO_YF = {
-    "BTC": "BTC-USD",
-    "ETH": "ETH-USD",
-    "SOL": "SOL-USD",
-    "BNB": "BNB-USD",
-    "LINK": "LINK-USD",
-    "DOGE": "DOGE-USD",
-    "SHIB": "SHIB-USD",
-    "PEPE": "PEPE24478-USD",
-    "WIF": "WIF-USD",
-    "BONK": "BONK-USD",
+# --- Kraken (крипта) ---
+KRAKEN_BASE = "https://api.kraken.com/0/public"
+KRAKEN_PAIRS = {
+    # Stable
+    "BTC": "XBTUSD",
+    "ETH": "ETHUSD",
+    "SOL": "SOLUSD",
+    "LINK": "LINKUSD",
+    # Meme
+    "DOGE": "DOGEUSD",
+    "SHIB": "SHIBUSD",
+    "PEPE": "PEPEUSD",
+    # BNB, WIF, BONK нет на Kraken — пропустим
 }
 
 # --- MOEX ---
@@ -31,47 +32,65 @@ MOEX_HISTORY_URL = (
 MOEX_TICKERS = ["SBER", "GAZP", "LKOH", "GMKN", "ROSN",
                 "NVTK", "TATN", "SNGS", "PLZL", "MTSS"]
 
-CRYPTO_DAYS_FULL = 1460
+CRYPTO_DAYS_FULL = 720    # Kraken даёт ~720 свечей
 STOCK_DAYS_FULL = 1095
 TIMEOUT_SEC = 30
 
 
-# ---------- Yahoo Finance (крипта) ----------
+# ---------- Kraken (крипта) ----------
 
-def fetch_yf_history(yf_ticker: str, days: int) -> list[dict]:
-    """История с Yahoo Finance."""
+def fetch_kraken_history(pair: str, days: int) -> list[dict]:
+    """Дневная история с Kraken (interval=1440 минут = 1 день)."""
+    url = f"{KRAKEN_BASE}/OHLC"
     try:
-        ticker = yf.Ticker(yf_ticker)
-        df = ticker.history(period=f"{days}d", interval="1d")
-        if df.empty:
-            log.warning(f"Yahoo {yf_ticker}: пусто")
-            return []
-
-        result = []
-        for idx, row in df.iterrows():
-            try:
-                price = float(row["Close"])
-                if price > 0:
-                    result.append({
-                        "date": idx.date().isoformat(),
-                        "price": price,
-                    })
-            except Exception:
-                continue
-
-        log.info(f"Yahoo {yf_ticker}: {len(result)} точек")
-        return result
+        r = requests.get(
+            url,
+            params={"pair": pair, "interval": 1440},
+            timeout=TIMEOUT_SEC,
+        )
+        r.raise_for_status()
+        data = r.json()
     except Exception as e:
-        log.error(f"Yahoo {yf_ticker}: {e}")
+        log.error(f"Kraken {pair}: {e}")
         return []
+
+    if data.get("error"):
+        log.error(f"Kraken {pair}: {data['error']}")
+        return []
+
+    result_data = data.get("result", {})
+    # Ищем ключ с данными (Kraken возвращает пару под своим именем)
+    keys = [k for k in result_data.keys() if k != "last"]
+    if not keys:
+        log.warning(f"Kraken {pair}: пустой ответ")
+        return []
+
+    rows = result_data[keys[0]]
+    # Формат: [time, open, high, low, close, vwap, volume, count]
+    cutoff = datetime.now() - timedelta(days=days)
+    out = []
+    for row in rows:
+        try:
+            ts = int(row[0])
+            dt = datetime.fromtimestamp(ts)
+            if dt < cutoff:
+                continue
+            price = float(row[4])  # close
+            if price > 0:
+                out.append({"date": dt.date().isoformat(), "price": price})
+        except Exception:
+            continue
+
+    log.info(f"Kraken {pair}: {len(out)} точек")
+    return out
 
 
 def load_crypto_history(days: int) -> int:
     total = 0
-    for ticker, yf_ticker in CRYPTO_YF.items():
-        records = fetch_yf_history(yf_ticker, min(days, CRYPTO_DAYS_FULL))
+    for ticker, pair in KRAKEN_PAIRS.items():
+        records = fetch_kraken_history(pair, min(days, CRYPTO_DAYS_FULL))
         if records:
-            saved = save_history(records, ticker, "crypto", "USD", "yahoo")
+            saved = save_history(records, ticker, "crypto", "USD", "kraken")
             total += saved
     return total
 
