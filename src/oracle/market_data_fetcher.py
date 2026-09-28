@@ -1,5 +1,5 @@
 """Оракул: сбор рыночных данных с MOEX, CoinGecko, ЦБ РФ.
-Крипта — 24/7. MOEX/ЦБ — только в рабочие часы Пн-Пт."""
+Крипта — 24/7 (10 монет). MOEX/ЦБ — только в рабочие часы Пн-Пт."""
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -18,13 +18,21 @@ MOEX_BASE = "https://iss.moex.com/iss"
 MOEX_BULK_URL = f"{MOEX_BASE}/engines/stock/markets/shares/boards/TQBR/securities.json"
 MOEX_TICKERS = {"SBER", "GAZP", "LKOH", "GMKN", "ROSN", "NVTK", "TATN", "SNGS", "PLZL", "MTSS"}
 
-# --- CoinGecko ---
+# --- CoinGecko (крипта) ---
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 CRYPTO_IDS = {
+    # Stable
     "BTC": "bitcoin",
     "ETH": "ethereum",
     "SOL": "solana",
     "BNB": "binancecoin",
+    "LINK": "chainlink",
+    # Meme
+    "DOGE": "dogecoin",
+    "SHIB": "shiba-inu",
+    "PEPE": "pepe",
+    "WIF": "dogwifcoin",
+    "BONK": "bonk",
 }
 
 MAX_RETRIES = 2
@@ -42,7 +50,6 @@ def _is_weekend() -> bool:
 
 
 def _is_moex_open() -> bool:
-    """MOEX работает Пн-Пт 07:00-23:50 МСК."""
     now = _now_msk()
     if now.weekday() >= 5:
         return False
@@ -128,16 +135,17 @@ def fetch_moex_bulk() -> dict[str, float]:
     return prices
 
 
-# ---------- CoinGecko ----------
+# ---------- CoinGecko (10 монет) ----------
 
-def fetch_coingecko_prices() -> dict[str, float]:
+def fetch_crypto_prices() -> dict[str, float]:
+    """Цены 10 монет через CoinGecko (один запрос)."""
     ids = ",".join(CRYPTO_IDS.values())
     url = f"{COINGECKO_BASE}/simple/price"
     try:
         r = requests.get(
             url,
             params={"ids": ids, "vs_currencies": "usd"},
-            timeout=TIMEOUT_SEC + 2,
+            timeout=TIMEOUT_SEC + 5,
         )
         r.raise_for_status()
         data = r.json()
@@ -217,7 +225,7 @@ def run_oracle() -> dict[str, Any]:
         log.info("MOEX закрыт — акции пропускаем")
         moex_prices = {}
 
-    crypto_prices = fetch_coingecko_prices()
+    crypto_prices = fetch_crypto_prices()
     metals_prices = fetch_cbr_metals()
 
     if not moex_prices and not crypto_prices and not metals_prices:
