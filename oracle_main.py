@@ -8,12 +8,23 @@ from src.core.notifier import notify
 from src.oracle.market_data_fetcher import run_oracle
 
 
+def _fmt_price(price: float) -> str:
+    """Умное форматирование: больше знаков для дешёвых монет."""
+    if price >= 1000:
+        return f"{price:,.2f}"
+    if price >= 1:
+        return f"{price:.4f}"
+    if price >= 0.01:
+        return f"{price:.6f}"
+    return f"{price:.10f}"
+
+
 def _format_prices(prices: dict[str, float], emoji: str, title: str) -> str:
     if not prices:
         return f"{emoji} {title}: нет данных"
     lines = [f"{emoji} {title}"]
     for ticker, price in sorted(prices.items()):
-        lines.append(f"  • {ticker}: {price:,.2f}")
+        lines.append(f"  • {ticker}: {_fmt_price(price)}")
     return "\n".join(lines)
 
 
@@ -41,7 +52,6 @@ def main() -> int:
         notify("🔮 ORACLE", f"❌ Оракул упал: {e}", force=True)
         return 1
 
-    # ВСЕГДА отправляем уведомление
     parts = []
     parts.append(_format_prices(result.get("moex", {}), "📈", "Акции MOEX (₽)"))
     parts.append(_format_prices(result.get("crypto", {}), "₿", "Крипта (USD)"))
