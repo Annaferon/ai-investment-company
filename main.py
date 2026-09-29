@@ -83,11 +83,26 @@ def main() -> int:
         elif execution.get("reason") == "no_price":
             body += "\n⚠️ Нет цены — сделка не исполнена"
 
-        acc = db.fetch_one("SELECT cash, initial_capital FROM account WHERE id = 1;")
+        acc = db.fetch_one(
+            """SELECT cash, initial_capital,
+                      COALESCE(total_deposits, 0) AS deposits
+               FROM account WHERE id = 1;"""
+        )
         if acc:
             cash = float(acc["cash"])
             initial = float(acc["initial_capital"])
-            body += f"\n\n💰 Кэш: {cash:,.2f} ₽ (от {initial:,.0f} ₽)"
+            deposits = float(acc["deposits"])
+            invested = initial + deposits
+
+            if deposits > 0:
+                capital_text = (
+                    f"{cash:,.2f} ₽ из {invested:,.0f} ₽ "
+                    f"(старт {initial:,.0f} + пополнения {deposits:,.0f})"
+                )
+            else:
+                capital_text = f"{cash:,.2f} ₽ (от {initial:,.0f} ₽)"
+
+            body += f"\n\n💰 Кэш: {capital_text}"
 
         notify("💼 TRADER-01", body)
 
