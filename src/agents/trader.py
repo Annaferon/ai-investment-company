@@ -23,7 +23,6 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 - SOL, BNB, LINK и все акции (Tier 2): максимум 5% капитала.
 - DOGE, SHIB, PEPE, WIF, BONK (Tier 3): максимум 3% капитала.
 - Не более 2 активов из одной группы.
-- После продажи тикера — 24 часа не покупать снова.
 - Дневной убыток 5% — полная блокировка торговли.
 
 ПРИОРИТЕТ ИСТОЧНИКОВ:
@@ -59,6 +58,7 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 """
 
 MAX_DATA_AGE_HOURS = 6
+COOLDOWN_HOURS = 24
 
 FALLBACK_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
@@ -76,6 +76,18 @@ class Trader(BaseAgent):
 
     def __init__(self, name: str = "Trader-01") -> None:
         super().__init__(name=name, role="trader")
+
+    # ---------- Данные ----------
+
+    def get_cooldown_tickers(self) -> set[str]:
+        """Тикеры, которые нельзя покупать (<24ч после продажи)."""
+        cutoff = datetime.now() - timedelta(hours=COOLDOWN_HOURS)
+        rows = db.fetch_all(
+            """SELECT DISTINCT ticker FROM trades
+               WHERE action = 'SELL' AND created_at >= %s;""",
+            (cutoff,),
+        )
+        return {r["ticker"] for r in rows}
 
     def get_market_prices(self) -> dict[str, float]:
         cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
@@ -214,6 +226,12 @@ class Trader(BaseAgent):
         if not prices:
             raise RuntimeError("Нет свежих рыночных данных")
 
+        # Исключаем тикеры в cooldown (нельзя покупать <24ч после продажи)
+        cooldown = self.get_cooldown_tickers()
+        if cooldown:
+            self.log.info(f"В cooldown: {cooldown} — исключаем из BUY")
+            prices = {t: p for t, p in prices.items() if t not in cooldown}
+
         portfolio = self.get_portfolio()
         cash = self.get_cash()
         news = self.get_latest_news()
@@ -235,6 +253,13 @@ class Trader(BaseAgent):
         if datetime.now().weekday() >= 5:
             weekend_hint = "\nВАЖНО: Выходной. Доступна только крипта."
 
+        cooldown_hint = ""
+        if cooldown:
+            cooldown_hint = (
+                f"\nВАЖНО: Тикеры {', '.join(cooldown)} в cooldown после недавней продажи. "
+                f"Их НЕ покупать в течение 24ч. В списке цен их уже нет."
+            )
+
         prompt = f"""Цены (₽):
 {json.dumps(prices, ensure_ascii=False, indent=2, default=float)}
 
@@ -248,7 +273,7 @@ class Trader(BaseAgent):
 {market_block}
 
 {analysts_block}
-{weekend_hint}
+{weekend_hint}{cooldown_hint}
 
 Что делаем? Отвечай JSON без пояснений."""
 
