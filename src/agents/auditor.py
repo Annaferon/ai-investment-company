@@ -445,50 +445,62 @@ class Auditor:
         }
 
     def get_account_stats(self) -> dict:
-        acc = db.fetch_one("SELECT cash, initial_capital FROM account WHERE id = 1;")
-        if not acc:
-            return {"cash": 0, "assets": 0, "total": 0, "initial": 0, "pnl": 0, "pnl_pct": 0}
+    acc = db.fetch_one(
+        """SELECT cash, initial_capital, 
+                  COALESCE(total_deposits, 0) AS deposits 
+           FROM account WHERE id = 1;"""
+    )
+    if not acc:
+        return {"cash": 0, "assets": 0, "total": 0, "initial": 0,
+                "deposits": 0, "invested": 0, "pnl": 0, "pnl_pct": 0}
 
-        cash = float(acc["cash"])
-        initial = float(acc["initial_capital"])
+    cash = float(acc["cash"])
+    initial = float(acc["initial_capital"])
+    deposits = float(acc["deposits"])
+    invested = initial + deposits
 
-        positions = db.fetch_all("SELECT ticker, quantity, avg_price FROM portfolio;")
-        assets_value = 0.0
-        for p in positions:
-            price_row = db.fetch_one(
-                """SELECT price FROM market_prices
-                   WHERE ticker = %s ORDER BY updated_at DESC LIMIT 1;""",
-                (p["ticker"],),
-            )
-            if price_row:
-                assets_value += float(p["quantity"]) * float(price_row["price"])
-            else:
-                assets_value += float(p["quantity"]) * float(p["avg_price"])
+    positions = db.fetch_all("SELECT ticker, quantity, avg_price FROM portfolio;")
+    assets_value = 0.0
+    for p in positions:
+        price_row = db.fetch_one(
+            """SELECT price FROM market_prices
+               WHERE ticker = %s ORDER BY updated_at DESC LIMIT 1;""",
+            (p["ticker"],),
+        )
+        if price_row:
+            assets_value += float(p["quantity"]) * float(price_row["price"])
+        else:
+            assets_value += float(p["quantity"]) * float(p["avg_price"])
 
-        total = cash + assets_value
-        pnl = total - initial
-        return {
-            "cash": cash,
-            "assets": assets_value,
-            "total": total,
-            "initial": initial,
-            "pnl": pnl,
-            "pnl_pct": pnl / initial * 100 if initial else 0,
-        }
-
-    # ---------- Отчёт ----------
+    total = cash + assets_value
+    pnl = total - invested
+    return {
+        "cash": cash,
+        "assets": assets_value,
+        "total": total,
+        "initial": initial,
+        "deposits": deposits,
+        "invested": invested,
+        "pnl": pnl,
+        "pnl_pct": pnl / invested * 100 if invested else 0,
+    }
 
     def build_report(self) -> str:
         lines = ["📊 *АУДИТ — эффективность агентов*", ""]
 
         acc = self.get_account_stats()
-        pnl_emoji = "🟢" if acc["pnl"] >= 0 else "🔴"
-        lines.append("💰 *КАПИТАЛ*")
-        lines.append(f"• Свободные: {acc['cash']:,.2f} ₽")
-        lines.append(f"• В активах: {acc['assets']:,.2f} ₽")
-        lines.append(f"• *Итого: {acc['total']:,.2f} ₽*")
-        lines.append(f"{pnl_emoji} P/L: {acc['pnl']:+,.2f} ₽ ({acc['pnl_pct']:+.2f}%)")
-        lines.append("")
+pnl_emoji = "🟢" if acc["pnl"] >= 0 else "🔴"
+invested_text = f"{acc['invested']:,.0f} ₽"
+if acc.get("deposits", 0) > 0:
+    invested_text += f" (старт {acc['initial']:,.0f} + пополнения {acc['deposits']:,.0f})"
+
+lines.append("💰 *КАПИТАЛ*")
+lines.append(f"• Свободные: {acc['cash']:,.2f} ₽")
+lines.append(f"• В активах: {acc['assets']:,.2f} ₽")
+lines.append(f"• *Итого: {acc['total']:,.2f} ₽*")
+lines.append(f"💵 Вложено: {invested_text}")
+lines.append(f"{pnl_emoji} P/L: {acc['pnl']:+,.2f} ₽ ({acc['pnl_pct']:+.2f}%)")
+lines.append("")
 
         lines.append("👥 *ЭФФЕКТИВНОСТЬ АГЕНТОВ*")
         agents = self.get_agent_stats()
