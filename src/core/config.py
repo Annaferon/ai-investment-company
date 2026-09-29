@@ -19,7 +19,13 @@ class Config:
     # --- Telegram (позже) ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
-    
+
+    # --- Макро-параметры (обновлять вручную при изменениях) ---
+    KEY_RATE: float = 18.0       # Ключевая ставка ЦБ РФ, %
+    INFLATION: float = 8.5       # Инфляция РФ, %
+    FED_RATE: float = 4.5        # Ставка ФРС, %
+    BRENT_PRICE: float = 85.0    # Нефть Brent, $
+   
     # --- Виртуальный капитал ---
     STARTING_CAPITAL: float = 10_000.0  # ₽
     
