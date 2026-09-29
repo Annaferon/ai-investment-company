@@ -13,16 +13,19 @@ TG_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
 def get_daily_stats() -> dict:
-    """Статистика за последние 24 часа."""
     period_end = datetime.now()
     period_start = period_end - timedelta(hours=24)
 
-    # Кэш
-    acc = db.fetch_one("SELECT cash, initial_capital FROM account WHERE id = 1;")
+    # Кэш + вложенный капитал
+    acc = db.fetch_one(
+        "SELECT cash, initial_capital, COALESCE(total_deposits, 0) AS deposits FROM account WHERE id = 1;"
+    )
     cash = float(acc["cash"]) if acc else 0.0
     initial = float(acc["initial_capital"]) if acc else 0.0
+    deposits = float(acc["deposits"]) if acc else 0.0
+    invested_capital = initial + deposits
 
-    # Курс USD/RUB
+    # USD/RUB
     usd_row = db.fetch_one(
         """SELECT price FROM market_prices
            WHERE ticker = 'USD_RUB' ORDER BY updated_at DESC LIMIT 1;"""
@@ -61,7 +64,7 @@ def get_daily_stats() -> dict:
             "value": value,
         })
 
-    # Сделки
+    # Сделки за 24ч
     trades = db.fetch_all(
         """SELECT ticker, action, quantity, price, total, commission
            FROM trades WHERE created_at BETWEEN %s AND %s ORDER BY created_at;""",
@@ -76,14 +79,20 @@ def get_daily_stats() -> dict:
     )
 
     return {
-        "cash": cash, "initial": initial, "assets": assets_value,
-        "total": cash + assets_value, "pnl": (cash + assets_value) - initial,
-        "positions": enriched_positions, "trades": trades, "decisions": decisions,
+        "cash": cash,
+        "initial": initial,
+        "deposits": deposits,
+        "invested_capital": invested_capital,
+        "assets": assets_value,
+        "total": cash + assets_value,
+        "pnl": (cash + assets_value) - invested_capital,
+        "positions": enriched_positions,
+        "trades": trades,
+        "decisions": decisions,
     }
 
 
 def _fmt_qty(qty: float) -> str:
-    """Красиво форматируем количество."""
     if qty >= 1:
         return f"{qty:.2f}"
     return f"{qty:.8f}".rstrip("0").rstrip(".")
@@ -91,6 +100,11 @@ def _fmt_qty(qty: float) -> str:
 
 def format_report(s: dict) -> str:
     pnl_sign = "🟢" if s["pnl"] >= 0 else "🔴"
+
+    invested_text = f"{s['invested_capital']:,.0f} ₽"
+    if s.get("deposits", 0) > 0:
+        invested_text += f" (старт {s['initial']:,.0f} + пополнения {s['deposits']:,.0f})"
+
     lines = [
         "🏦 *AI Investment Company*",
         f"📅 {date.today().strftime('%d.%m.%Y')}",
@@ -99,7 +113,8 @@ def format_report(s: dict) -> str:
         f"• Свободные деньги: {s['cash']:,.2f} ₽",
         f"• В активах: {s['assets']:,.2f} ₽",
         f"• *ИТОГО: {s['total']:,.2f} ₽*",
-        f"{pnl_sign} P/L: {s['pnl']:+,.2f} ₽ (от {s['initial']:,.0f} ₽)",
+        f"💵 Вложено: {invested_text}",
+        f"{pnl_sign} P/L: {s['pnl']:+,.2f} ₽",
         "",
     ]
 
