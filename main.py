@@ -42,7 +42,6 @@ def main() -> int:
     logger.info("Запуск одного цикла Trader...")
     result = trader.run()
 
-    # Формируем сообщение
     if "error" in result:
         notify("💼 TRADER-01", f"❌ Ошибка: {result['error']}")
     else:
@@ -60,6 +59,7 @@ def main() -> int:
             f"🧠 {reasoning}\n"
         )
 
+        # Логика отображения
         if execution.get("executed"):
             body += (
                 f"\n✅ Исполнено:\n"
@@ -68,14 +68,16 @@ def main() -> int:
                 f"  • Сумма: {execution.get('total', 0):,.2f} ₽\n"
                 f"  • Комиссия: {execution.get('commission', 0):,.2f} ₽"
             )
-        elif execution.get("reason") == "cash_hold":
+        elif action == "HOLD" and ticker == "CASH":
             body += "\n💤 Остаёмся в кэше"
+        elif action == "HOLD":
+            body += f"\n✋ Держим позицию {ticker}"
         elif execution.get("reason") == "risk_rejected":
             body += f"\n⚠️ Risk Manager отклонил: {execution.get('detail', '')}"
         elif execution.get("reason") == "no_price":
             body += "\n⚠️ Нет цены — сделка не исполнена"
 
-        # Портфель и капитал
+        # Капитал
         acc = db.fetch_one("SELECT cash, initial_capital FROM account WHERE id = 1;")
         if acc:
             cash = float(acc["cash"])
