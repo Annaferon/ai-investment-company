@@ -1,7 +1,6 @@
-"""Auditor — оценивает эффективность агентов.
-- Stock/Crypto/Metals → сигналы по тикерам, оценка через 3 дня
-- News/Market → общий sentiment против MOEX-корзины (10 акций)
-- Fallback на market_prices, если нет в price_history."""
+"""Auditor — УНИВЕРСАЛЬНЫЙ. Автоматически находит все таблицы *_reports
+и оценивает сигналы агентов. При добавлении нового агента — ничего
+в Auditor менять не надо."""
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
@@ -10,17 +9,13 @@ from src.core.logger import get_logger
 
 log = get_logger("auditor")
 
-# Таблицы с сигналами по конкретным тикерам
-TICKER_REPORT_TABLES = {
-    "stock_reports": "stock",
-    "crypto_reports": "crypto",
-    "metals_reports": "metal",
-}
-
-# MOEX-корзина — для оценки News и Market
+# MOEX-корзина — для оценки макро-агентов (News, Market)
 MOEX_BASKET = ["SBER", "GAZP", "LKOH", "GMKN", "ROSN",
                "NVTK", "TATN", "SNGS", "PLZL", "MTSS"]
 BASKET_TICKER = "MOEX_BASKET"
+
+# Таблицы, которые НЕ надо обрабатывать как макро (это холдеры)
+SKIP_TABLES = {"market_reports"}  # market обрабатываем отдельно, по overall_trend
 
 LOOKBACK_DAYS = 60
 EVAL_WINDOW_DAYS = 3
@@ -31,11 +26,55 @@ class Auditor:
     def __init__(self, name: str = "Auditor-01") -> None:
         self.name = name
 
+    # ---------- Автодискаверинг таблиц ----------
+
+    def _discover_report_tables(self) -> list[dict]:
+        """Находит все таблицы *_reports и определяет их структуру."""
+        tables = db.fetch_all(
+            """SELECT table_name
+               FROM information_schema.tables
+               WHERE table_schema = 'public'
+                 AND table_name LIKE '%%_reports'
+               ORDER BY table_name;"""
+        )
+        result = []
+        for t in tables:
+            table = t["table_name"]
+            cols_rows = db.fetch_all(
+                """SELECT column_name
+                   FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = %s;""",
+                (table,),
+            )
+            cols = {c["column_name"] for c in cols_rows}
+
+            # Какие колонки есть?
+            has_ticker = "ticker" in cols
+            has_sentiment = "sentiment" in cols
+            has_report_date = "report_date" in cols
+            has_overall_trend = "overall_trend" in cols
+
+            if not has_sentiment and not has_overall_trend:
+                continue  # нельзя оценить — нет sentiment
+
+            if not has_report_date:
+                continue  # нельзя оценить — нет даты
+
+            result.append({
+                "table": table,
+                "has_ticker": has_ticker,
+                "has_sentiment": has_sentiment,
+                "has_overall_trend": has_overall_trend,
+            })
+
+        log.info(f"Auditor нашёл таблиц: {[t['table'] for t in result]}")
+        return result
+
     # ---------- Получение цен ----------
 
     def _get_price_at(self, ticker: str, target_date) -> Optional[float]:
-        """Цена тикера на дату. Fallback на market_prices."""
-        # 1. price_history
+        if target_date is None:
+            return None
         row = db.fetch_one(
             """SELECT price FROM price_history
                WHERE ticker = %s AND price_date <= %s
@@ -45,7 +84,6 @@ class Auditor:
         if row:
             return float(row["price"])
 
-        # 2. market_prices (Oracle каждый час)
         target_end = datetime.combine(target_date, datetime.max.time())
         row = db.fetch_one(
             """SELECT price FROM market_prices
@@ -56,7 +94,8 @@ class Auditor:
         return float(row["price"]) if row else None
 
     def _get_basket_value(self, target_date) -> Optional[float]:
-        """Сумма цен всех 10 акций MOEX (для оценки News/Market)."""
+        if target_date is None:
+            return None
         total = 0.0
         count = 0
         for ticker in MOEX_BASKET:
@@ -66,124 +105,147 @@ class Auditor:
                 count += 1
         return total if count >= 5 else None
 
-    # ---------- Вставка новых сигналов ----------
-
-    def _insert_ticker_signals(self) -> int:
-        inserted = 0
-        cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
-
-        for table in TICKER_REPORT_TABLES.keys():
-            try:
-                rows = db.fetch_all(
-                    f"""SELECT agent_name, ticker, sentiment, report_date
-                        FROM {table}
-                        WHERE report_date >= %s
-                          AND sentiment IN ('bullish', 'bearish')
-                        ORDER BY report_date ASC;""",
-                    (cutoff,),
-                )
-            except Exception as e:
-                log.error(f"Ошибка чтения {table}: {e}")
-                continue
-
-            for r in rows:
-                ticker = r["ticker"]
-                signal_date = r["report_date"]
-                price = self._get_price_at(ticker, signal_date)
-                if price is None or price <= 0:
-                    continue
-                try:
-                    db.execute(
-                        """INSERT INTO signal_outcomes
-                           (agent_name, ticker, source_table, signal_type,
-                            signal_date, price_at_signal)
-                           VALUES (%s, %s, %s, %s, %s, %s)
-                           ON CONFLICT DO NOTHING;""",
-                        (r["agent_name"], ticker, table, r["sentiment"],
-                         signal_date, price),
-                    )
-                    inserted += 1
-                except Exception as e:
-                    log.error(f"Ошибка вставки {ticker}: {e}")
-
-        return inserted
-
-    def _insert_macro_signals(self) -> int:
-        """News и Market — против MOEX-корзины."""
-        inserted = 0
-        cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
-
-        # --- News ---
-        try:
-            news_rows = db.fetch_all(
-                """SELECT agent_name, sentiment, report_date
-                   FROM news_reports
-                   WHERE report_date >= %s
-                     AND sentiment IN ('positive', 'negative')
-                   ORDER BY report_date ASC;""",
-                (cutoff,),
-            )
-            for r in news_rows:
-                signal_type = "bullish" if r["sentiment"] == "positive" else "bearish"
-                basket = self._get_basket_value(r["report_date"])
-                if basket is None or basket <= 0:
-                    continue
-                try:
-                    db.execute(
-                        """INSERT INTO signal_outcomes
-                           (agent_name, ticker, source_table, signal_type,
-                            signal_date, price_at_signal)
-                           VALUES (%s, %s, %s, %s, %s, %s)
-                           ON CONFLICT DO NOTHING;""",
-                        (r["agent_name"], BASKET_TICKER, "news_reports",
-                         signal_type, r["report_date"], basket),
-                    )
-                    inserted += 1
-                except Exception as e:
-                    log.error(f"Ошибка news {r['report_date']}: {e}")
-        except Exception as e:
-            log.error(f"Ошибка чтения news_reports: {e}")
-
-        # --- Market ---
-        try:
-            market_rows = db.fetch_all(
-                """SELECT agent_name, overall_trend, report_date
-                   FROM market_reports
-                   WHERE report_date >= %s
-                     AND overall_trend IN ('bullish', 'bearish')
-                   ORDER BY report_date ASC;""",
-                (cutoff,),
-            )
-            for r in market_rows:
-                signal_type = r["overall_trend"]
-                basket = self._get_basket_value(r["report_date"])
-                if basket is None or basket <= 0:
-                    continue
-                try:
-                    db.execute(
-                        """INSERT INTO signal_outcomes
-                           (agent_name, ticker, source_table, signal_type,
-                            signal_date, price_at_signal)
-                           VALUES (%s, %s, %s, %s, %s, %s)
-                           ON CONFLICT DO NOTHING;""",
-                        (r["agent_name"], BASKET_TICKER, "market_reports",
-                         signal_type, r["report_date"], basket),
-                    )
-                    inserted += 1
-                except Exception as e:
-                    log.error(f"Ошибка market {r['report_date']}: {e}")
-        except Exception as e:
-            log.error(f"Ошибка чтения market_reports: {e}")
-
-        return inserted
-
-    # ---------- Оценка ----------
-
     def _get_future_price(self, ticker: str, after_date) -> Optional[float]:
-        """Цена на дату — для MOEX_BASKET используем корзину."""
         if ticker == BASKET_TICKER:
             return self._get_basket_value(after_date)
         return self._get_price_at(ticker, after_date)
+
+    # ---------- Вставка сигналов ----------
+
+    def _insert_ticker_signal(
+        self, agent_name: str, ticker: str, table: str,
+        signal_date, sentiment: str,
+    ) -> bool:
+        signal_type = None
+        if sentiment in ("bullish", "bearish"):
+            signal_type = sentiment
+        elif sentiment == "positive":
+            signal_type = "bullish"
+        elif sentiment == "negative":
+            signal_type = "bearish"
+
+        if not signal_type:
+            return False
+
+        price = self._get_price_at(ticker, signal_date)
+        if price is None or price <= 0:
+            return False
+
+        try:
+            db.execute(
+                """INSERT INTO signal_outcomes
+                   (agent_name, ticker, source_table, signal_type,
+                    signal_date, price_at_signal)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT DO NOTHING;""",
+                (agent_name, ticker, table, signal_type, signal_date, price),
+            )
+            return True
+        except Exception as e:
+            log.error(f"Ошибка вставки {table}/{ticker}: {e}")
+            return False
+
+    def _insert_macro_signal(
+        self, agent_name: str, table: str, signal_date, signal_type: str,
+    ) -> bool:
+        basket = self._get_basket_value(signal_date)
+        if basket is None or basket <= 0:
+            return False
+        try:
+            db.execute(
+                """INSERT INTO signal_outcomes
+                   (agent_name, ticker, source_table, signal_type,
+                    signal_date, price_at_signal)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT DO NOTHING;""",
+                (agent_name, BASKET_TICKER, table, signal_type, signal_date, basket),
+            )
+            return True
+        except Exception as e:
+            log.error(f"Ошибка вставки macro {table}: {e}")
+            return False
+
+    def _insert_new_signals(self) -> dict:
+        """Автоматически проходит по всем *_reports и собирает сигналы."""
+        cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
+        tables = self._discover_report_tables()
+        stats = {}
+
+        for t in tables:
+            table = t["table"]
+            inserted = 0
+
+            if t["has_ticker"] and t["has_sentiment"]:
+                # Тикерная таблица (Stock, Crypto, Metals, Historical)
+                try:
+                    rows = db.fetch_all(
+                        f"""SELECT agent_name, ticker, sentiment, report_date
+                            FROM {table}
+                            WHERE report_date >= %s
+                              AND sentiment IN ('bullish', 'bearish',
+                                                'positive', 'negative')
+                            ORDER BY report_date ASC;""",
+                        (cutoff,),
+                    )
+                except Exception as e:
+                    log.error(f"Ошибка чтения {table}: {e}")
+                    continue
+
+                for r in rows:
+                    if self._insert_ticker_signal(
+                        r["agent_name"], r["ticker"], table,
+                        r["report_date"], r["sentiment"],
+                    ):
+                        inserted += 1
+
+            elif t["has_overall_trend"]:
+                # Market-подобная (overall_trend вместо sentiment)
+                try:
+                    rows = db.fetch_all(
+                        f"""SELECT agent_name, overall_trend, report_date
+                            FROM {table}
+                            WHERE report_date >= %s
+                              AND overall_trend IN ('bullish', 'bearish')
+                            ORDER BY report_date ASC;""",
+                        (cutoff,),
+                    )
+                except Exception as e:
+                    log.error(f"Ошибка чтения {table}: {e}")
+                    continue
+
+                for r in rows:
+                    if self._insert_macro_signal(
+                        r["agent_name"], table, r["report_date"], r["overall_trend"],
+                    ):
+                        inserted += 1
+
+            elif t["has_sentiment"]:
+                # Макро (News) — sentiment positive/negative
+                try:
+                    rows = db.fetch_all(
+                        f"""SELECT agent_name, sentiment, report_date
+                            FROM {table}
+                            WHERE report_date >= %s
+                              AND sentiment IN ('positive', 'negative')
+                            ORDER BY report_date ASC;""",
+                        (cutoff,),
+                    )
+                except Exception as e:
+                    log.error(f"Ошибка чтения {table}: {e}")
+                    continue
+
+                for r in rows:
+                    signal_type = "bullish" if r["sentiment"] == "positive" else "bearish"
+                    if self._insert_macro_signal(
+                        r["agent_name"], table, r["report_date"], signal_type,
+                    ):
+                        inserted += 1
+
+            stats[table] = inserted
+
+        return stats
+
+    # ---------- Оценка ----------
 
     def _evaluate_pending_signals(self) -> int:
         eval_date = date.today() - timedelta(days=EVAL_WINDOW_DAYS)
@@ -468,18 +530,17 @@ class Auditor:
 
     def run_daily(self) -> dict[str, Any]:
         log.info("Auditor daily запускается...")
-        sig_ticker = self._insert_ticker_signals()
-        sig_macro = self._insert_macro_signals()
+        sig_stats = self._insert_new_signals()
         evaluated_signals = self._evaluate_pending_signals()
         inserted_trades = self._insert_new_trades()
         evaluated_trades = self._evaluate_pending_trades()
 
-        log.info(f"Сигналы: тикерных +{sig_ticker}, macro +{sig_macro}, оценено {evaluated_signals}")
+        log.info(f"Сигналы: {sig_stats}")
+        log.info(f"Оценено сигналов: {evaluated_signals}")
         log.info(f"Сделки: +{inserted_trades}, оценено {evaluated_trades}")
 
         return {
-            "signals_ticker": sig_ticker,
-            "signals_macro": sig_macro,
+            "signals_by_table": sig_stats,
             "signals_evaluated": evaluated_signals,
             "trades_inserted": inserted_trades,
             "trades_evaluated": evaluated_trades,
