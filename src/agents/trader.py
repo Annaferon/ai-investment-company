@@ -48,17 +48,20 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 
 MAX_DATA_AGE_HOURS = 6
 
-# Обновлённый список — актуальные бесплатные модели
+# Актуальные бесплатные модели (обновлено 29.09.2026)
 FALLBACK_MODELS = [
-    "deepseek/deepseek-chat-v3.1:free",
-    "qwen/qwen3-235b-a22b:free",
-    "google/gemini-2.0-flash-exp:free",
-    "mistralai/mistral-small-3.2-24b-instruct:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "google/gemma-4-31b-it:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+    "openai/gpt-oss-20b:free",
+    "cohere/north-mini-code:free",
+    "openrouter/free",
 ]
 
 
 class Trader(BaseAgent):
-    DEFAULT_MODEL = "deepseek/deepseek-chat-v3.1:free"
+    DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
     def __init__(self, name: str = "Trader-01") -> None:
         super().__init__(name=name, role="trader")
@@ -219,7 +222,6 @@ class Trader(BaseAgent):
 
 Что делаем? Отвечай JSON без пояснений."""
 
-        # Fallback + парсинг ВНУТРИ цикла
         last_error = None
         for model in FALLBACK_MODELS:
             try:
