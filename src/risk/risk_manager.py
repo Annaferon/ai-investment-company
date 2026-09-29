@@ -1,7 +1,7 @@
 """Risk Manager — комплексная защита капитала.
 Tier-система, дневной лимит, корреляция, cooldown."""
 import json
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from src.core.database import db
@@ -11,40 +11,36 @@ log = get_logger("risk_manager")
 
 
 # ---------- Глобальные лимиты ----------
-MAX_RISK_PER_TRADE_PCT = 0.01      # 1% капитала риск на сделку
-MAX_DAILY_LOSS_PCT = 5.0           # Дневной лимит убытка
-MIN_TRADE_SIZE = 500.0             # Минимальная сумма сделки
-MAX_DATA_AGE_HOURS = 6             # Свежесть цен
+MAX_DAILY_LOSS_PCT = 5.0
+MIN_TRADE_SIZE = 300.0
+MAX_DATA_AGE_HOURS = 6
 
 # ---------- Tier-система ----------
 TIER1 = {"BTC", "ETH"}
 TIER2 = {"SOL", "BNB", "LINK"}
 TIER3 = {"DOGE", "SHIB", "PEPE", "WIF", "BONK"}
 
-# Лимиты по тирам
-TIER1_MAX_POSITION_PCT = 0.15     # 15% на позицию
-TIER1_MAX_PORTFOLIO_PCT = 0.50    # 50% всего в Tier 1
-TIER1_STOP_LOSS_PCT = 0.30        # Широкий стоп
-TIER1_TAKE_PROFIT_PCT = 0.20      # Тейк +20%
-TIER1_PEAK_TO_SELL = 85.0         # Продажа при пике 85%+
+TIER1_MAX_POSITION_PCT = 0.15
+TIER1_MAX_PORTFOLIO_PCT = 0.50
+TIER1_STOP_LOSS_PCT = 0.30
+TIER1_TAKE_PROFIT_PCT = 0.20
+TIER1_PEAK_TO_SELL = 85.0
 
-TIER2_MAX_POSITION_PCT = 0.05     # 5% на позицию
-TIER2_MAX_PORTFOLIO_PCT = 0.30    # 30% всего в Tier 2
-TIER2_STOP_LOSS_PCT = 0.15        # Стоп 15%
-TIER2_TAKE_PROFIT_PCT = 0.25      # Тейк +25%
+TIER2_MAX_POSITION_PCT = 0.05
+TIER2_MAX_PORTFOLIO_PCT = 0.30
+TIER2_STOP_LOSS_PCT = 0.15
+TIER2_TAKE_PROFIT_PCT = 0.25
 
-TIER3_MAX_POSITION_PCT = 0.03     # 3% на позицию
-TIER3_MAX_PORTFOLIO_PCT = 0.10    # 10% всего в Tier 3
-TIER3_STOP_LOSS_PCT = 0.10        # Жёсткий стоп 10%
-TIER3_TAKE_PROFIT_PCT = 0.30      # Тейк +30%
+TIER3_MAX_POSITION_PCT = 0.03
+TIER3_MAX_PORTFOLIO_PCT = 0.10
+TIER3_STOP_LOSS_PCT = 0.10
+TIER3_TAKE_PROFIT_PCT = 0.30
 
-# Корреляционные группы
 CORRELATION_GROUPS = {
     "bitcoin_ecosystem": {"BTC", "ETH", "SOL", "BNB"},
     "memecoins": {"DOGE", "SHIB", "PEPE", "WIF", "BONK"},
 }
 
-# Cooldown после продажи
 COOLDOWN_HOURS = 24
 
 MAX_CRYPTO_POSITIONS = 5
@@ -58,7 +54,7 @@ def _tier(ticker: str) -> int:
         return 2
     if ticker in TIER3:
         return 3
-    return 2  # акции, металлы — Tier 2
+    return 2
 
 
 class RiskManager:
@@ -142,13 +138,28 @@ class RiskManager:
         return float(row["price"]) * qty if row else 0.0
 
     def _get_tier_exposure(self, tier: int) -> float:
-        """Суммарная стоимость позиций в данном Tier."""
         positions = self._get_portfolio_positions()
         total = 0.0
         for p in positions:
             if _tier(p["ticker"]) == tier:
                 total += self._position_value(p["ticker"], float(p["quantity"]))
         return total
+
+    def _get_daily_loss(self) -> float:
+        """Текущий % дневного P/L к вложенному капиталу."""
+        capital_now = self._get_capital()
+
+        acc = db.fetch_one(
+            """SELECT initial_capital,
+                      COALESCE(total_deposits, 0) AS deposits
+               FROM account WHERE id = 1;"""
+        )
+        if not acc:
+            return 0.0
+        invested = float(acc["initial_capital"]) + float(acc["deposits"])
+        if invested <= 0:
+            return 0.0
+        return (capital_now - invested) / invested * 100
 
     # ---------- Сохранение проверки ----------
 
@@ -176,23 +187,6 @@ class RiskManager:
             ),
         )
 
-    # ---------- Дневной лимит ----------
-
-    def _get_daily_loss(self) -> float:
-    """Текущий % дневного P/L к вложенному капиталу."""
-    capital_now = self._get_capital()
-
-    acc = db.fetch_one(
-        """SELECT initial_capital, COALESCE(total_deposits, 0) AS deposits
-           FROM account WHERE id = 1;"""
-    )
-    if not acc:
-        return 0.0
-    invested = float(acc["initial_capital"]) + float(acc["deposits"])
-    if invested <= 0:
-        return 0.0
-    return (capital_now - invested) / invested * 100
-    
     # ---------- Основная проверка ----------
 
     def check(self, decision: dict[str, Any]) -> dict[str, Any]:
@@ -215,7 +209,6 @@ class RiskManager:
         capital = self._get_capital()
         daily_loss = self._get_daily_loss()
 
-        # Дневной лимит убытка
         if daily_loss <= -MAX_DAILY_LOSS_PCT:
             return self._reject(
                 decision,
@@ -228,14 +221,12 @@ class RiskManager:
 
         # ---------- BUY ----------
         if action == "BUY":
-            # Cooldown
             if self._is_cooling_down(ticker):
                 return self._reject(
                     decision, f"{ticker} в cooldown после продажи",
                     ["cooldown"], tier=tier,
                 )
 
-            # Лимит по тиру
             if tier == 1:
                 max_pos_pct = TIER1_MAX_POSITION_PCT
                 max_tier_pct = TIER1_MAX_PORTFOLIO_PCT
@@ -246,7 +237,6 @@ class RiskManager:
                 max_pos_pct = TIER3_MAX_POSITION_PCT
                 max_tier_pct = TIER3_MAX_PORTFOLIO_PCT
 
-            # Лимит на позицию
             max_cost = capital * max_pos_pct
             precision = 8 if asset_type == "crypto" else 0
             max_qty = round(max_cost / price, precision) if price > 0 else 0
@@ -261,7 +251,6 @@ class RiskManager:
 
             cost = quantity * price
 
-            # Минимум сделки
             if cost < MIN_TRADE_SIZE:
                 min_qty = round(MIN_TRADE_SIZE / price + 10 ** (-precision), precision)
                 if min_qty > max_qty or min_qty * price > self._get_cash():
@@ -273,7 +262,6 @@ class RiskManager:
                 quantity = min_qty
                 rules.append(f"min_trade_size ({quantity})")
 
-            # Лимит на весь Tier
             tier_exposure = self._get_tier_exposure(tier)
             new_tier_pct = (tier_exposure + cost) / capital * 100 if capital > 0 else 0
             if new_tier_pct > max_tier_pct * 100:
@@ -283,7 +271,6 @@ class RiskManager:
                     [f"tier{tier}_portfolio_limit"], tier=tier,
                 )
 
-            # Корреляционный лимит
             for group_name, group_tickers in CORRELATION_GROUPS.items():
                 if ticker in group_tickers:
                     group_positions = [
@@ -297,12 +284,12 @@ class RiskManager:
                             ["correlation_limit"], tier=tier,
                         )
 
-            # Лимит по классам
             by_type = self._get_portfolio_positions()
-            crypto_count = sum(1 for p in by_type if _tier(p["ticker"]) in (1, 2, 3) and p["ticker"] in (TIER1 | TIER2 | TIER3))
-            stock_count = sum(1 for p in by_type if p["ticker"] not in (TIER1 | TIER2 | TIER3))
-
             existing = {p["ticker"] for p in by_type}
+
+            crypto_count = len([p for p in by_type if p["ticker"] in (TIER1 | TIER2 | TIER3)])
+            stock_count = len([p for p in by_type if p["ticker"] not in (TIER1 | TIER2 | TIER3)])
+
             if ticker not in existing:
                 if asset_type == "crypto" and crypto_count >= MAX_CRYPTO_POSITIONS:
                     return self._reject(decision, f"лимит {MAX_CRYPTO_POSITIONS} крипто", ["max_crypto"], tier=tier)
@@ -334,7 +321,6 @@ class RiskManager:
 
             decision = {**decision, "quantity": quantity, "price": price}
 
-            # === TIER 1: BTC, ETH — не продаём в убыток ===
             if tier == 1:
                 hist_pos = self._get_historical_position(ticker)
 
@@ -349,11 +335,9 @@ class RiskManager:
                     rules.append(f"tier1_peak ({hist_pos:.0f}%)")
                     return self._approve(
                         decision, rules, tier=tier, pnl_pct=pnl_pct,
-                        daily_loss=daily_loss,
-                        reason=f"Tier 1: пик ({hist_pos:.0f}%)",
+                        daily_loss=daily_loss, reason=f"Tier 1: пик ({hist_pos:.0f}%)",
                     )
 
-                # Если P/L упал больше чем на 30% — это критично, разрешаем
                 if pnl_pct <= -TIER1_STOP_LOSS_PCT * 100:
                     rules.append(f"tier1_critical_stop ({pnl_pct:+.1f}%)")
                     return self._approve(
@@ -368,7 +352,6 @@ class RiskManager:
                     pnl_pct=pnl_pct, daily_loss=daily_loss,
                 )
 
-            # === TIER 2 / TIER 3 ===
             if tier == 2:
                 stop_loss = TIER2_STOP_LOSS_PCT * 100
                 take_profit = TIER2_TAKE_PROFIT_PCT * 100
