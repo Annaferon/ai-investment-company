@@ -1,7 +1,6 @@
-"""AI Architect — анализирует работу агентов и предлагает улучшения.
-Пока данных мало — только наблюдает. Когда накопит статистику — даёт предложения."""
+"""AI Architect — анализирует работу агентов и предлагает улучшения."""
 import json
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from src.agents.base import BaseAgent
@@ -12,64 +11,49 @@ SYSTEM_PROMPT = """Ты — AI Architect инвестиционной компа
 Твоя задача: проанализировать работу агентов и предложить улучшения.
 
 ТИПЫ ПРЕДЛОЖЕНИЙ (proposal_type):
-- "hire" — нанять нового агента (например, Geopolitical Analyst)
-- "fire" — уволить (например, агент с точностью <40% и 20+ сигналами)
-- "modify" — доработать агента (например, разделить Crypto на Stable/Meme)
-- "consolidate" — объединить (например, если 2 агента делают похожее)
-- "observe" — наблюдать (мало данных, но есть вопрос)
+- "hire" — нанять нового агента
+- "fire" — уволить
+- "modify" — доработать агента
+- "consolidate" — объединить
+- "observe" — наблюдать
 
 ПРАВИЛА:
 1. Если оценённых сигналов < 100 — не давай оценок «кого уволить».
-   Вместо этого — предложения "observe" и "hire" (каких агентов не хватает).
-2. Увольнение: агент с точностью < 40% И минимум 20 оценённых сигналов.
-3. Дубли: если 2 агента делают похожее — предложи объединить.
-4. Не предлагай больше 3 предложений за раз. Только самые важные.
-5. Будь конкретен. Не «улучшить анализ» — а «разделить Crypto на Stable (BTC/ETH) и Meme (DOGE/SHIB)».
+2. Увольнение: точность < 40% И минимум 20 оценённых сигналов.
+3. Дубли: если 2 агента делают похожее — объединить.
+4. Не больше 3 предложений за раз.
+5. Будь конкретен.
 
 Отвечай СТРОГО JSON:
 {
-  "summary": "1-2 предложения общего состояния компании",
+  "summary": "1-2 предложения состояния компании",
   "proposals": [
     {
-      "proposal_type": "hire" | "fire" | "modify" | "consolidate" | "observe",
-      "target_agent": "название агента или роль",
-      "title": "краткое название предложения",
-      "reasoning": "2-4 предложения обоснования",
+      "proposal_type": "hire",
+      "target_agent": "...",
+      "title": "...",
+      "reasoning": "...",
       "confidence": 0.0-1.0
     }
   ]
 }
 """
 
-# Агенты из roadmap — которых ещё нет (для проверки «hire»)
 EXPECTED_AGENTS = [
-    "News Analyst",
-    "Market Analyst",
-    "Stock Analyst",
-    "Crypto Analyst",
-    "Metals Analyst",
-    "Historical Analyst",
-    "Macro Economist",
-    "Trader",
-    "Risk Manager",
-    "Auditor",
-    "Opportunity Hunter",
-    "Portfolio Manager",
-    "Investment Committee",
+    "News Analyst", "Market Analyst", "Stock Analyst", "Crypto Analyst",
+    "Metals Analyst", "Historical Analyst", "Macro Economist",
+    "Trader", "Risk Manager", "Auditor",
+    "Opportunity Hunter", "Portfolio Manager", "Investment Committee",
 ]
 
-# Кандидаты на добавление (из roadmap)
 CANDIDATE_AGENTS = [
-    "Geopolitical Analyst",
-    "Bonds Analyst",
-    "Forex Analyst",
-    "Commodities Analyst",
-    "On-Chain Analyst",
+    "Geopolitical Analyst", "Bonds Analyst", "Forex Analyst",
+    "Commodities Analyst", "On-Chain Analyst",
 ]
 
 
 class AIArchitect(BaseAgent):
-    """AI Architect — мета-агент, анализирует систему."""
+    """AI Architect — мета-агент."""
 
     DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
@@ -79,23 +63,23 @@ class AIArchitect(BaseAgent):
     # ---------- Данные ----------
 
     def get_agent_stats(self) -> list[dict]:
-        """Точность каждого агента из signal_outcomes."""
         rows = db.fetch_all(
             """SELECT agent_name,
                       COUNT(*) as total,
-                      SUM(CASE WHEN is_correct THEN 1 ELSE 0 END) as correct,
-                      SUM(CASE WHEN is_correct IS NULL THEN 1 ELSE 0 END) as pending
+                      COALESCE(SUM(CASE WHEN is_correct THEN 1 ELSE 0 END), 0) as correct,
+                      COALESCE(SUM(CASE WHEN is_correct IS NULL THEN 1 ELSE 0 END), 0) as pending
                FROM signal_outcomes
                GROUP BY agent_name
                ORDER BY agent_name;"""
         )
         result = []
         for r in rows:
-            total = int(r["total"])
-            correct = int(r["correct"] or 0)
-            evaluated = total - int(r["pending"] or 0)
+            total = int(r.get("total") or 0)
+            correct = int(r.get("correct") or 0)
+            pending = int(r.get("pending") or 0)
+            evaluated = total - pending
             result.append({
-                "agent_name": r["agent_name"],
+                "agent_name": r.get("agent_name") or "?",
                 "total": total,
                 "evaluated": evaluated,
                 "correct": correct,
@@ -106,15 +90,16 @@ class AIArchitect(BaseAgent):
     def get_trader_stats(self) -> dict:
         row = db.fetch_one(
             """SELECT COUNT(*) as total,
-                      SUM(CASE WHEN is_correct THEN 1 ELSE 0 END) as correct,
-                      SUM(CASE WHEN is_correct IS NULL THEN 1 ELSE 0 END) as pending
+                      COALESCE(SUM(CASE WHEN is_correct THEN 1 ELSE 0 END), 0) as correct,
+                      COALESCE(SUM(CASE WHEN is_correct IS NULL THEN 1 ELSE 0 END), 0) as pending
                FROM trade_outcomes;"""
         )
         if not row:
             return {"total": 0, "evaluated": 0, "correct": 0, "accuracy": 0}
-        total = int(row["total"])
-        correct = int(row["correct"] or 0)
-        evaluated = total - int(row["pending"] or 0)
+        total = int(row.get("total") or 0)
+        correct = int(row.get("correct") or 0)
+        pending = int(row.get("pending") or 0)
+        evaluated = total - pending
         return {
             "total": total,
             "evaluated": evaluated,
@@ -125,46 +110,61 @@ class AIArchitect(BaseAgent):
     def get_risk_stats(self) -> dict:
         row = db.fetch_one(
             """SELECT COUNT(*) as total,
-                      SUM(CASE WHEN approved THEN 1 ELSE 0 END) as approved,
-                      SUM(CASE WHEN NOT approved THEN 1 ELSE 0 END) as rejected,
-                      SUM(CASE WHEN was_adjusted THEN 1 ELSE 0 END) as adjusted
+                      COALESCE(SUM(CASE WHEN approved THEN 1 ELSE 0 END), 0) as approved,
+                      COALESCE(SUM(CASE WHEN NOT approved THEN 1 ELSE 0 END), 0) as rejected,
+                      COALESCE(SUM(CASE WHEN was_adjusted THEN 1 ELSE 0 END), 0) as adjusted
                FROM risk_checks;"""
         )
         if not row:
             return {"total": 0, "approved": 0, "rejected": 0, "adjusted": 0}
         return {
-            "total": int(row["total"] or 0),
-            "approved": int(row["approved"] or 0),
-            "rejected": int(row["rejected"] or 0),
-            "adjusted": int(row["adjusted"] or 0),
+            "total": int(row.get("total") or 0),
+            "approved": int(row.get("approved") or 0),
+            "rejected": int(row.get("rejected") or 0),
+            "adjusted": int(row.get("adjusted") or 0),
         }
 
     def get_report_tables(self) -> list[str]:
         rows = db.fetch_all(
             """SELECT table_name FROM information_schema.tables
-               WHERE table_schema = 'public' AND table_name LIKE '%_reports'
+               WHERE table_schema = 'public'
+                 AND table_name LIKE '%_reports'
                ORDER BY table_name;"""
         )
-        return [r["table_name"] for r in rows]
+        return [r.get("table_name") or "?" for r in rows]
 
     def get_total_evaluated(self) -> int:
         row = db.fetch_one(
             """SELECT COUNT(*) as cnt FROM signal_outcomes
                WHERE is_correct IS NOT NULL;"""
         )
-        return int(row["cnt"]) if row else 0
+        return int(row.get("cnt") or 0) if row else 0
 
     # ---------- Анализ ----------
 
     def analyze(self) -> dict[str, Any]:
+        self.log.info("Шаг 1: get_total_evaluated")
         total_evaluated = self.get_total_evaluated()
-        agents = self.get_agent_stats()
-        trader = self.get_trader_stats()
-        risk = self.get_risk_stats()
-        tables = self.get_report_tables()
+        self.log.info(f"  → {total_evaluated}")
 
-        # Формируем контекст для LLM
-        lines = [f"СТАТИСТИКА СИСТЕМЫ:"]
+        self.log.info("Шаг 2: get_agent_stats")
+        agents = self.get_agent_stats()
+        self.log.info(f"  → {len(agents)} агентов")
+
+        self.log.info("Шаг 3: get_trader_stats")
+        trader = self.get_trader_stats()
+        self.log.info(f"  → {trader}")
+
+        self.log.info("Шаг 4: get_risk_stats")
+        risk = self.get_risk_stats()
+        self.log.info(f"  → {risk}")
+
+        self.log.info("Шаг 5: get_report_tables")
+        tables = self.get_report_tables()
+        self.log.info(f"  → {tables}")
+
+        self.log.info("Шаг 6: формирование промпта")
+        lines = ["СТАТИСТИКА СИСТЕМЫ:"]
         lines.append(f"Всего оценённых сигналов: {total_evaluated}")
         lines.append(f"Таблиц отчётов: {len(tables)}")
         lines.append(f"Таблицы: {', '.join(tables)}")
@@ -187,26 +187,24 @@ class AIArchitect(BaseAgent):
 
         lines.append("RISK MANAGER:")
         lines.append(
-            f"  • Всего проверок: {risk['total']}, "
+            f"  • Проверок: {risk['total']}, "
             f"одобрено {risk['approved']}, отклонено {risk['rejected']}, "
             f"скорректировано {risk['adjusted']}"
         )
         lines.append("")
 
-        lines.append("НА РАССМОТРЕНИИ — какие агенты есть в roadmap, но не в системе:")
-        for agent in EXPECTED_AGENTS:
-            # Проверяем по имени в таблицах reports
-            found = any(agent.lower().replace(" ", "_").replace("-", "_")[:8] in t for t in tables)
-            if not found and agent not in ("Trader", "Risk Manager", "Auditor"):
-                lines.append(f"  • {agent} — нет таблицы reports")
-        lines.append("")
-
-        lines.append(f"КАНДИДАТЫ НА ДОБАВЛЕНИЕ: {', '.join(CANDIDATE_AGENTS)}")
+        lines.append("КАНДИДАТЫ НА ДОБАВЛЕНИЕ:")
+        for agent in CANDIDATE_AGENTS:
+            lines.append(f"  • {agent}")
 
         prompt = "\n".join(lines)
+        self.log.info(f"  → промпт: {len(prompt)} символов")
 
+        self.log.info("Шаг 7: вызов LLM")
         raw = self.think(prompt=prompt, system=SYSTEM_PROMPT)
+        self.log.info(f"  → получено: {len(raw)} символов")
 
+        self.log.info("Шаг 8: парсинг JSON")
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.strip("`").replace("json", "", 1).strip()
@@ -269,7 +267,7 @@ class AIArchitect(BaseAgent):
         try:
             analysis = self.analyze()
         except Exception as e:
-            self.log.error(f"Ошибка анализа: {e}")
+            self.log.exception(f"Ошибка анализа: {e}")
             return {"error": str(e)}
 
         saved = self.save_proposals(analysis)
