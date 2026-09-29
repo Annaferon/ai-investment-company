@@ -8,6 +8,11 @@ from src.core.notifier import notify
 from src.agents.news_analyst import NewsAnalyst
 
 
+def _safe(value, default=""):
+    """Защита от None."""
+    return value if value is not None else default
+
+
 def main() -> int:
     logger.info("=" * 60)
     logger.info("News Analyst запускается...")
@@ -31,15 +36,20 @@ def main() -> int:
     if "error" in result:
         notify("📰 NEWS-01", f"❌ Ошибка: {result['error']}")
     else:
-        sentiment = result.get("sentiment", "?")
+        sentiment = _safe(result.get("sentiment"), "neutral")
         emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(sentiment, "⚪")
-        events = result.get("key_events", [])
-        events_text = "\n".join(f"  • {e.get('title', '?')}" for e in events[:7])
+
+        events = result.get("key_events") or []  # защита от None
+        events_text = "\n".join(
+            f"  • {_safe(e.get('title'), '?')}"
+            for e in events[:7]
+            if isinstance(e, dict)
+        ) or "  (нет событий)"
 
         body = (
             f"{emoji} Sentiment: {sentiment}\n"
-            f"Уверенность: {result.get('confidence', '?')}\n\n"
-            f"📌 Вывод:\n{result.get('summary', '')}\n\n"
+            f"Уверенность: {_safe(result.get('confidence'), '?')}\n\n"
+            f"📌 Вывод:\n{_safe(result.get('summary'), '(нет вывода)')}\n\n"
             f"🔑 События:\n{events_text}"
         )
         notify("📰 NEWS-01", body)
