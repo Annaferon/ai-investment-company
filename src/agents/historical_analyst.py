@@ -1,5 +1,5 @@
 """Historical Analyst — анализ долгосрочной истории цен.
-Считает динамику за 1д/7д/30д/90д/365д/720д и отдаёт LLM для оценки."""
+Считает динамику за 1д/7д/30д/90д/365д/720д."""
 import json
 from datetime import date
 from typing import Any, Optional
@@ -9,32 +9,32 @@ from src.core.database import db
 
 
 SYSTEM_PROMPT = """Ты — старший аналитик долгосрочных трендов инвестиционной компании.
-Твоя задача: на основе истории цен за 2 года дать оценку каждой монете/акции.
 
-Тебе даются ГОТОВЫЕ метрики:
-- Текущая цена
-- Изменения за: 1д / 7д / 30д / 90д / 365д / 720д
-- Минимум и максимум за 720 дней
-- Позиция в диапазоне (0% = дно, 100% = пик)
-- Тренд (растёт / падает / боковик)
+КРИТИЧНО ВАЖНО — КАК ОПРЕДЕЛЯТЬ SENTIMENT:
 
-ПРАВИЛА АНАЛИЗА:
-1. Позиция в диапазоне 720д:
-   - 0-20% → историческое дно → зона покупки
-   - 20-40% → ниже среднего → умеренная покупка
-   - 40-60% → нейтрально
-   - 60-80% → выше среднего → осторожно
-   - 80-100% → исторический пик → зона продажи
+ГЛАВНЫЙ ПРИОРИТЕТ — ПОЗИЦИЯ В ДИАПАЗОНЕ 720 ДНЕЙ:
+- 0-20% → историческое ДНО → SENTIMENT = "bullish" (зона покупки)
+- 20-40% → ниже среднего → SENTIMENT = "bullish" или "neutral"
+- 40-60% → середина → SENTIMENT = "neutral"
+- 60-80% → выше среднего → SENTIMENT = "neutral" или "bearish"
+- 80-100% → исторический ПИК → SENTIMENT = "bearish" (зона продажи)
 
-2. Смотри на согласованность периодов:
-   - Все периоды плюс → устойчивый рост
-   - Краткосрочно +, долгосрочно − → отскок в падающем тренде (риск)
-   - Краткосрочно −, долгосрочно + → коррекция в растущем тренде (возможность)
+ВАЖНО: trend (bullish/bearish/sideways) — это ОТДЕЛЬНАЯ метрика про прошлое.
+Она НЕ определяет sentiment. Sentiment определяет — выгодно ли покупать СЕЙЧАС.
 
-3. Тренд:
-   - "bullish" — все периоды положительные или цена выше среднего
-   - "bearish" — большинство периодов отрицательные
-   - "sideways" — периоды разнонаправленные
+Пример:
+- Монета упала в 3 раза за год → trend = "bearish"
+- Но если позиция = 5% (дно) → sentiment = "bullish" (потому что это ЗОНА ПОКУПКИ)
+
+ОЦЕНКА SCORE (0-10):
+- Позиция < 10% → score 8-10 (сильная покупка)
+- Позиция 10-30% → score 6-8 (покупка)
+- Позиция 30-60% → score 4-6 (нейтрально)
+- Позиция 60-85% → score 2-4 (зона продажи)
+- Позиция > 85% → score 0-2 (сильная продажа)
+
+Если краткосрочные периоды (1д/7д/30д) положительные, а позиция низкая —
+это признак разворота вверх, усиливает сигнал покупки.
 
 Отвечай СТРОГО JSON-массивом:
 [
@@ -44,7 +44,7 @@ SYSTEM_PROMPT = """Ты — старший аналитик долгосрочн
     "sentiment": "bullish" | "neutral" | "bearish",
     "score": 0-10,
     "confidence": 0.0-1.0,
-    "reasoning": "2-3 предложения на русском с опорой на метрики"
+    "reasoning": "2-3 предложения с опорой на позицию в диапазоне и изменения"
   }
 ]
 """
@@ -111,10 +111,12 @@ class HistoricalAnalyst(BaseAgent):
         prices = [h["price"] for h in history]
         current = self.get_current_price(ticker) or prices[-1]
 
+        # ВАЖНО: если данных меньше n, используем самую старую точку
         def price_n_days_ago(n: int) -> Optional[float]:
-            if len(prices) <= n:
+            if len(prices) < 2:
                 return None
-            return prices[-(n + 1)]
+            idx = max(0, len(prices) - 1 - n)
+            return prices[idx]
 
         change_1d = _pct_change(current, price_n_days_ago(1))
         change_7d = _pct_change(current, price_n_days_ago(7))
@@ -126,10 +128,13 @@ class HistoricalAnalyst(BaseAgent):
         lo, hi = min(prices), max(prices)
         range_pos = ((current - lo) / (hi - lo) * 100) if hi > lo else 50.0
 
-        long_changes = [c for c in [change_90d, change_365d, change_720d] if c is not None]
-        if long_changes and all(c > 5 for c in long_changes):
+        # Trend — по долгосрочным периодам
+        long_changes = [c for c in [change_365d, change_720d] if c is not None]
+        if not long_changes:
+            long_changes = [c for c in [change_90d, change_30d] if c is not None]
+        if long_changes and all(c > 10 for c in long_changes):
             trend = "bullish"
-        elif long_changes and all(c < -5 for c in long_changes):
+        elif long_changes and all(c < -10 for c in long_changes):
             trend = "bearish"
         else:
             trend = "sideways"
@@ -172,14 +177,19 @@ class HistoricalAnalyst(BaseAgent):
             )
             lines.append(
                 f"Диапазон 720д: {m['min_720d']:,.4f} — {m['max_720d']:,.4f} "
-                f"(позиция: {m['range_position']}%)"
+                f"(ПОЗИЦИЯ: {m['range_position']}%)"
             )
             lines.append(f"Тренд: {m['trend']}")
         return "\n".join(lines)
 
     def analyze(self, metrics: list[dict]) -> list[dict[str, Any]]:
         text = self._format_metrics(metrics)
-        prompt = f"Исторический анализ за 720 дней:\n\n{text}\n\nДай оценку каждой монете/акции."
+        prompt = (
+            f"Исторический анализ за 720 дней:\n\n{text}\n\n"
+            f"НАПОМИНАЮ: sentiment определяется ГЛАВНЫМ ОБРАЗОМ по позиции в диапазоне "
+            f"(дно → bullish, пик → bearish). Trend — отдельная метрика про прошлое.\n"
+            f"Дай оценку каждой монете/акции."
+        )
 
         raw = self.think(prompt=prompt, system=SYSTEM_PROMPT)
 
