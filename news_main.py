@@ -33,18 +33,21 @@ def main() -> int:
     analyst = NewsAnalyst(name="News-01")
     result = analyst.run()
 
+    # result может быть None (на всякий случай)
+    result = result if isinstance(result, dict) else {}
+
     if "error" in result:
-        notify("📰 NEWS-01", f"❌ Ошибка: {result['error']}")
+        notify("📰 NEWS-01", f"❌ Ошибка: {_safe(result.get('error'), 'unknown')}")
     else:
         sentiment = _safe(result.get("sentiment"), "neutral")
         emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(sentiment, "⚪")
 
-        events = result.get("key_events") or []  # защита от None
-        events_text = "\n".join(
-            f"  • {_safe(e.get('title'), '?')}"
-            for e in events[:7]
-            if isinstance(e, dict)
-        ) or "  (нет событий)"
+        events = result.get("key_events") or []
+        event_lines = []
+        for e in events[:7]:
+            if isinstance(e, dict):
+                event_lines.append(f"  • {_safe(e.get('title'), '?')}")
+        events_text = "\n".join(event_lines) if event_lines else "  (нет событий)"
 
         body = (
             f"{emoji} Sentiment: {sentiment}\n"
