@@ -12,7 +12,7 @@ log = get_logger("risk_manager")
 
 # ---------- Глобальные лимиты ----------
 MAX_DAILY_LOSS_PCT = 5.0
-MIN_TRADE_SIZE = 300.0
+MIN_TRADE_SIZE = 500.0
 MAX_DATA_AGE_HOURS = 6
 
 # ---------- Tier-система ----------
