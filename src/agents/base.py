@@ -12,7 +12,7 @@ from src.core.logger import get_logger
 class BaseAgent(ABC):
     """Все агенты наследуются от этого класса."""
 
-    DEFAULT_MODEL = "deepseek/deepseek-chat-v3.1:free"
+    DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
     def __init__(self, name: str, role: str, model: Optional[str] = None) -> None:
         self.name = name
@@ -42,7 +42,6 @@ class BaseAgent(ABC):
             temperature=0.3,
         )
 
-        # Защита от None
         if not response or not response.choices:
             raise RuntimeError("LLM вернула пустой response")
 
