@@ -11,47 +11,57 @@ from src.core.logger import get_logger
 
 class BaseAgent(ABC):
     """Все агенты наследуются от этого класса."""
-    
-    # По умолчанию — дешёвая модель. Можно переопределить в наследнике.
-    DEFAULT_MODEL = "openai/gpt-4o-mini"
-    
+
+    DEFAULT_MODEL = "deepseek/deepseek-chat-v3.1:free"
+
     def __init__(self, name: str, role: str, model: Optional[str] = None) -> None:
         self.name = name
         self.role = role
         self.model = model or self.DEFAULT_MODEL
         self.log = get_logger(name)
-        
+
         self.client = OpenAI(
             base_url=config.OPENROUTER_BASE_URL,
             api_key=config.OPENROUTER_API_KEY,
         )
-        
+
         self.log.info(f"Агент инициализирован: {name} ({role})")
-    
-    # ---------- Работа с LLM ----------
-    
+
+    # ---------- LLM ----------
+
     def think(self, prompt: str, system: Optional[str] = None) -> str:
-        """Отправить запрос в LLM и получить текстовый ответ."""
+        """Отправить запрос в LLM. Всегда возвращает непустую строку или бросает исключение."""
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.3,
-            )
-            text = response.choices[0].message.content or ""
-            self.log.debug(f"LLM ответ: {text[:200]}...")
-            return text.strip()
-        except Exception as e:
-            self.log.error(f"Ошибка LLM: {e}")
-            raise
-    
-    # ---------- Запись в БД ----------
-    
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=0.3,
+        )
+
+        # Защита от None
+        if not response or not response.choices:
+            raise RuntimeError("LLM вернула пустой response")
+
+        choice = response.choices[0]
+        if not choice or not choice.message:
+            raise RuntimeError("LLM вернула пустой choice")
+
+        content = choice.message.content
+        if content is None:
+            raise RuntimeError("LLM вернула None в content")
+
+        text = content.strip()
+        if not text:
+            raise RuntimeError("LLM вернула пустой текст")
+
+        return text
+
+    # ---------- БД ----------
+
     def record_decision(
         self,
         ticker: str,
@@ -59,19 +69,13 @@ class BaseAgent(ABC):
         confidence: float = 0.0,
         reasoning: str = "",
     ) -> None:
-        """Записать решение агента в таблицу decisions."""
         db.execute(
-            """
-            INSERT INTO decisions (agent_name, ticker, action, confidence, reasoning)
-            VALUES (%s, %s, %s, %s, %s);
-            """,
+            """INSERT INTO decisions (agent_name, ticker, action, confidence, reasoning)
+               VALUES (%s, %s, %s, %s, %s);""",
             (self.name, ticker, action, confidence, reasoning),
         )
         self.log.info(f"Решение записано: {action} {ticker} (уверенность: {confidence})")
-    
-    # ---------- Абстрактный метод ----------
-    
+
     @abstractmethod
     def run(self) -> Any:
-        """Основная логика агента. Реализуется в наследниках."""
         ...
