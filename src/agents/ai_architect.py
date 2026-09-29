@@ -39,16 +39,12 @@ SYSTEM_PROMPT = """Ты — AI Architect инвестиционной компа
 }
 """
 
-EXPECTED_AGENTS = [
-    "News Analyst", "Market Analyst", "Stock Analyst", "Crypto Analyst",
-    "Metals Analyst", "Historical Analyst", "Macro Economist",
-    "Trader", "Risk Manager", "Auditor",
-    "Opportunity Hunter", "Portfolio Manager", "Investment Committee",
-]
-
 CANDIDATE_AGENTS = [
-    "Geopolitical Analyst", "Bonds Analyst", "Forex Analyst",
-    "Commodities Analyst", "On-Chain Analyst",
+    "Geopolitical Analyst",
+    "Bonds Analyst",
+    "Forex Analyst",
+    "Commodities Analyst",
+    "On-Chain Analyst",
 ]
 
 
@@ -125,10 +121,11 @@ class AIArchitect(BaseAgent):
         }
 
     def get_report_tables(self) -> list[str]:
+        # ВАЖНО: %% для psycopg2 (placeholder)
         rows = db.fetch_all(
             """SELECT table_name FROM information_schema.tables
                WHERE table_schema = 'public'
-                 AND table_name LIKE '%_reports'
+                 AND table_name LIKE '%%_reports'
                ORDER BY table_name;"""
         )
         return [r.get("table_name") or "?" for r in rows]
@@ -143,27 +140,12 @@ class AIArchitect(BaseAgent):
     # ---------- Анализ ----------
 
     def analyze(self) -> dict[str, Any]:
-        self.log.info("Шаг 1: get_total_evaluated")
         total_evaluated = self.get_total_evaluated()
-        self.log.info(f"  → {total_evaluated}")
-
-        self.log.info("Шаг 2: get_agent_stats")
         agents = self.get_agent_stats()
-        self.log.info(f"  → {len(agents)} агентов")
-
-        self.log.info("Шаг 3: get_trader_stats")
         trader = self.get_trader_stats()
-        self.log.info(f"  → {trader}")
-
-        self.log.info("Шаг 4: get_risk_stats")
         risk = self.get_risk_stats()
-        self.log.info(f"  → {risk}")
-
-        self.log.info("Шаг 5: get_report_tables")
         tables = self.get_report_tables()
-        self.log.info(f"  → {tables}")
 
-        self.log.info("Шаг 6: формирование промпта")
         lines = ["СТАТИСТИКА СИСТЕМЫ:"]
         lines.append(f"Всего оценённых сигналов: {total_evaluated}")
         lines.append(f"Таблиц отчётов: {len(tables)}")
@@ -198,13 +180,9 @@ class AIArchitect(BaseAgent):
             lines.append(f"  • {agent}")
 
         prompt = "\n".join(lines)
-        self.log.info(f"  → промпт: {len(prompt)} символов")
 
-        self.log.info("Шаг 7: вызов LLM")
         raw = self.think(prompt=prompt, system=SYSTEM_PROMPT)
-        self.log.info(f"  → получено: {len(raw)} символов")
 
-        self.log.info("Шаг 8: парсинг JSON")
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.strip("`").replace("json", "", 1).strip()
@@ -267,7 +245,7 @@ class AIArchitect(BaseAgent):
         try:
             analysis = self.analyze()
         except Exception as e:
-            self.log.exception(f"Ошибка анализа: {e}")
+            self.log.error(f"Ошибка анализа: {e}")
             return {"error": str(e)}
 
         saved = self.save_proposals(analysis)
