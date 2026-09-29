@@ -1,0 +1,32 @@
+name: Run Historical Analyst
+
+on:
+  schedule:
+    # 13:55 МСК = 10:55 UTC — после Oracle, перед другими аналитиками
+    - cron: '55 10 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-historical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Historical Analyst
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DEBUG_NOTIFY: ${{ secrets.DEBUG_NOTIFY }}
+        run: python historical_main.py
