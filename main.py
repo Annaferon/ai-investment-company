@@ -50,16 +50,18 @@ def main() -> int:
         confidence = result.get("confidence", "?")
         reasoning = result.get("reasoning", "")
         execution = result.get("execution", {})
+        risk_check = result.get("risk_check", {})
 
         emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⚪"}.get(action, "⚪")
+        tier = risk_check.get("tier")
+        tier_text = f" (Tier {tier})" if tier else ""
 
         body = (
-            f"{emoji} Решение: {action} {ticker}\n"
+            f"{emoji} Решение: {action} {ticker}{tier_text}\n"
             f"Уверенность: {confidence}\n\n"
             f"🧠 {reasoning}\n"
         )
 
-        # Логика отображения
         if execution.get("executed"):
             body += (
                 f"\n✅ Исполнено:\n"
@@ -68,16 +70,19 @@ def main() -> int:
                 f"  • Сумма: {execution.get('total', 0):,.2f} ₽\n"
                 f"  • Комиссия: {execution.get('commission', 0):,.2f} ₽"
             )
+            if risk_check.get("was_adjusted"):
+                body += f"\n  ⚠️ Скорректировано: {risk_check.get('reason')}"
         elif action == "HOLD" and ticker == "CASH":
             body += "\n💤 Остаёмся в кэше"
         elif action == "HOLD":
             body += f"\n✋ Держим позицию {ticker}"
         elif execution.get("reason") == "risk_rejected":
             body += f"\n⚠️ Risk Manager отклонил: {execution.get('detail', '')}"
+            if risk_check.get("rules"):
+                body += f"\n  Правила: {', '.join(risk_check.get('rules', []))}"
         elif execution.get("reason") == "no_price":
             body += "\n⚠️ Нет цены — сделка не исполнена"
 
-        # Капитал
         acc = db.fetch_one("SELECT cash, initial_capital FROM account WHERE id = 1;")
         if acc:
             cash = float(acc["cash"])
