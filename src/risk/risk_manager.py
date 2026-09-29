@@ -179,16 +179,20 @@ class RiskManager:
     # ---------- Дневной лимит ----------
 
     def _get_daily_loss(self) -> float:
-        """Текущий % дневного P/L (отрицательный = убыток)."""
-        # Считаем от стартового капитала дня
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        capital_now = self._get_capital()
+    """Текущий % дневного P/L к вложенному капиталу."""
+    capital_now = self._get_capital()
 
-        # Простая логика: считаем по текущему капиталу к начальному 10000
-        acc = db.fetch_one("SELECT initial_capital FROM account WHERE id = 1;")
-        initial = float(acc["initial_capital"]) if acc else 10000.0
-        return (capital_now - initial) / initial * 100
-
+    acc = db.fetch_one(
+        """SELECT initial_capital, COALESCE(total_deposits, 0) AS deposits
+           FROM account WHERE id = 1;"""
+    )
+    if not acc:
+        return 0.0
+    invested = float(acc["initial_capital"]) + float(acc["deposits"])
+    if invested <= 0:
+        return 0.0
+    return (capital_now - invested) / invested * 100
+    
     # ---------- Основная проверка ----------
 
     def check(self, decision: dict[str, Any]) -> dict[str, Any]:
