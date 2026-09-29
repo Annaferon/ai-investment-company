@@ -14,9 +14,17 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 
 ВАЖНО ПРО РЕЖИМ РАБОТЫ:
 - Акции РФ (MOEX): Пн–Пт 07:00–23:50 МСК. В выходные закрыты.
-- КРИПТА: торгуется КРУГЛОСУТОЧНО.
+- КРИПТА: торгуется КРУГОСУТОЧНО.
 - Количество крипты — ДРОБНОЕ (0.00028 BTC). Акций — целое.
 - Если не знаешь quantity — ставь quantity: 0 (Risk Manager рассчитает).
+
+ЛИМИТЫ RISK MANAGER (соблюдай!):
+- BTC, ETH (Tier 1): максимум 15% капитала на позицию.
+- SOL, BNB, LINK и все акции (Tier 2): максимум 5% капитала.
+- DOGE, SHIB, PEPE, WIF, BONK (Tier 3): максимум 3% капитала.
+- Не более 2 активов из одной группы (BTC/ETH/SOL/BNB — вместе; мемкоины — вместе).
+- После продажи тикера — 24 часа не покупать снова.
+- Дневной убыток 5% — полная блокировка торговли.
 
 ПРИОРИТЕТ ИСТОЧНИКОВ:
 1. HISTORICAL — долгосрочный контекст (позиция в 720-дневном диапазоне)
@@ -29,10 +37,13 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 - Позиция 20-40% + bullish → умеренная покупка
 - Позиция >80% (пик) + bearish → продажа
 
-ОБЩИЕ ПРАВИЛА:
+ПРАВИЛА SELL:
+- BTC и ETH НЕ ПРОДАЁМ в убыток — только при прибыли ≥20% или если цена на пике (позиция >85%).
+- Мемкоины и альткоины — обычный стоп-лосс (10-15%).
+
+ОБЩЕЕ:
 - Все цены — в рублях.
 - Комиссия брокера: 0.05%.
-- Не рискуй более 20% капитала в одной сделке.
 - Не покупай в bearish-тренде рынка.
 - Если хочешь остаться в деньгах — ticker "CASH", action "HOLD".
 
@@ -48,7 +59,6 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 
 MAX_DATA_AGE_HOURS = 6
 
-# Актуальные бесплатные модели (обновлено 29.09.2026)
 FALLBACK_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -65,8 +75,6 @@ class Trader(BaseAgent):
 
     def __init__(self, name: str = "Trader-01") -> None:
         super().__init__(name=name, role="trader")
-
-    # ---------- Данные ----------
 
     def get_market_prices(self) -> dict[str, float]:
         cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
@@ -177,8 +185,6 @@ class Trader(BaseAgent):
 
         return "ОТЧЁТЫ АНАЛИТИКОВ:\n\n" + "\n\n".join(blocks)
 
-    # ---------- Решение ----------
-
     def decide(self) -> dict[str, Any]:
         prices = self.get_market_prices()
         if not prices:
@@ -233,7 +239,6 @@ class Trader(BaseAgent):
                 if cleaned.startswith("```"):
                     cleaned = cleaned.strip("`").replace("json", "", 1).strip()
 
-                # Обрезаем всё, что до первой {
                 first_brace = cleaned.find("{")
                 last_brace = cleaned.rfind("}")
                 if first_brace != -1 and last_brace > first_brace:
@@ -253,8 +258,6 @@ class Trader(BaseAgent):
                 continue
 
         raise RuntimeError(f"Все модели недоступны. Последняя ошибка: {last_error}")
-
-    # ---------- Цикл ----------
 
     def run(self) -> dict[str, Any]:
         self.log.info("Trader просыпается...")
