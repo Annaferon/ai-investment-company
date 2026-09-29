@@ -1,4 +1,5 @@
-"""AI Architect — анализирует работу агентов и предлагает улучшения."""
+"""AI Architect — анализирует работу агентов и предлагает улучшения.
+При <100 оценённых сигналах — только наблюдает, не даёт оценок."""
 import json
 from datetime import date
 from typing import Any
@@ -10,29 +11,37 @@ from src.core.database import db
 SYSTEM_PROMPT = """Ты — AI Architect инвестиционной компании.
 Твоя задача: проанализировать работу агентов и предложить улучшения.
 
-ТИПЫ ПРЕДЛОЖЕНИЙ (proposal_type):
-- "hire" — нанять нового агента
-- "fire" — уволить
-- "modify" — доработать агента
-- "consolidate" — объединить
-- "observe" — наблюдать
+⚠️ КРИТИЧЕСКОЕ ПРАВИЛО (прочитай первым):
+Если в системе МЕНЬШЕ 100 оценённых сигналов — ты НЕ имеешь права
+предлагать hire/fire/modify. Ты можешь предложить ТОЛЬКО:
+- proposal_type = "observe"
+- summary: "Система в режиме накопления данных, ждём N оценённых сигналов"
 
-ПРАВИЛА:
-1. Если оценённых сигналов < 100 — не давай оценок «кого уволить».
-2. Увольнение: точность < 40% И минимум 20 оценённых сигналов.
-3. Дубли: если 2 агента делают похожее — объединить.
-4. Не больше 3 предложений за раз.
-5. Будь конкретен.
+Рекомендации по изменениям (hire/fire/modify) возможны ТОЛЬКО когда:
+- В системе >= 100 оценённых сигналов, И
+- У конкретного агента >= 20 оценённых сигналов.
+
+ТИПЫ ПРЕДЛОЖЕНИЙ (когда данных достаточно):
+- "hire" — нанять нового агента (новый класс активов, новые данные)
+- "fire" — уволить (точность <40% И >=20 сигналов)
+- "modify" — доработать (например, разделить Crypto на Stable/Meme)
+- "consolidate" — объединить (если 2 агента делают похожее)
+- "observe" — наблюдать (мало данных)
+
+ЯЗЫК ОТВЕТА: ТОЛЬКО РУССКИЙ. Никаких английских слов в полях.
+Даже технические термины — по-русски: "нанять", "уволить", "доработать".
+
+МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ за раз.
 
 Отвечай СТРОГО JSON:
 {
-  "summary": "1-2 предложения состояния компании",
+  "summary": "1-2 предложения состояния компании на русском",
   "proposals": [
     {
-      "proposal_type": "hire",
-      "target_agent": "...",
-      "title": "...",
-      "reasoning": "...",
+      "proposal_type": "observe",
+      "target_agent": "название или общий",
+      "title": "кратко на русском",
+      "reasoning": "2-3 предложения на русском",
       "confidence": 0.0-1.0
     }
   ]
@@ -40,12 +49,16 @@ SYSTEM_PROMPT = """Ты — AI Architect инвестиционной компа
 """
 
 CANDIDATE_AGENTS = [
-    "Geopolitical Analyst",
-    "Bonds Analyst",
-    "Forex Analyst",
-    "Commodities Analyst",
-    "On-Chain Analyst",
+    "Геополитический аналитик",
+    "Аналитик облигаций (ОФЗ)",
+    "Аналитик Forex",
+    "Аналитик сырья (нефть, газ)",
+    "On-Chain аналитик",
 ]
+
+# Пороги
+MIN_EVALUATED_FOR_PROPOSALS = 100
+MIN_EVALUATED_PER_AGENT = 20
 
 
 class AIArchitect(BaseAgent):
@@ -121,7 +134,6 @@ class AIArchitect(BaseAgent):
         }
 
     def get_report_tables(self) -> list[str]:
-        # ВАЖНО: %% для psycopg2 (placeholder)
         rows = db.fetch_all(
             """SELECT table_name FROM information_schema.tables
                WHERE table_schema = 'public'
@@ -137,49 +149,65 @@ class AIArchitect(BaseAgent):
         )
         return int(row.get("cnt") or 0) if row else 0
 
-    # ---------- Анализ ----------
+    # ---------- Сбор контекста ----------
 
-    def analyze(self) -> dict[str, Any]:
+    def _build_context(self) -> tuple[str, int, bool]:
+        """Возвращает: текст для LLM, всего оценённых, режим наблюдения."""
         total_evaluated = self.get_total_evaluated()
         agents = self.get_agent_stats()
         trader = self.get_trader_stats()
         risk = self.get_risk_stats()
         tables = self.get_report_tables()
 
+        watch_mode = total_evaluated < MIN_EVALUATED_FOR_PROPOSALS
+
         lines = ["СТАТИСТИКА СИСТЕМЫ:"]
         lines.append(f"Всего оценённых сигналов: {total_evaluated}")
+        lines.append(f"Порог для предложений: {MIN_EVALUATED_FOR_PROPOSALS}")
+        lines.append(f"Режим: {'НАБЛЮДЕНИЕ (мало данных)' if watch_mode else 'РАБОТА'}")
         lines.append(f"Таблиц отчётов: {len(tables)}")
-        lines.append(f"Таблицы: {', '.join(tables)}")
         lines.append("")
 
-        lines.append("АГЕНТЫ (точность):")
+        lines.append("АГЕНТЫ (статистика):")
         for a in agents:
             lines.append(
-                f"  • {a['agent_name']}: {a['accuracy']:.1f}% "
-                f"({a['correct']}/{a['evaluated']}, ожидает {a['total'] - a['evaluated']})"
+                f"  • {a['agent_name']}: всего сигналов {a['total']}, "
+                f"оценено {a['evaluated']}, точность {a['accuracy']:.1f}%"
             )
         lines.append("")
 
         lines.append("TRADER:")
         lines.append(
-            f"  • Точность: {trader['accuracy']:.1f}% "
-            f"({trader['correct']}/{trader['evaluated']})"
+            f"  • всего {trader['total']}, оценено {trader['evaluated']}, "
+            f"точность {trader['accuracy']:.1f}%"
         )
         lines.append("")
 
         lines.append("RISK MANAGER:")
         lines.append(
-            f"  • Проверок: {risk['total']}, "
+            f"  • всего проверок: {risk['total']}, "
             f"одобрено {risk['approved']}, отклонено {risk['rejected']}, "
             f"скорректировано {risk['adjusted']}"
         )
         lines.append("")
 
-        lines.append("КАНДИДАТЫ НА ДОБАВЛЕНИЕ:")
-        for agent in CANDIDATE_AGENTS:
-            lines.append(f"  • {agent}")
+        if not watch_mode:
+            lines.append("КАНДИДАТЫ НА ДОБАВЛЕНИЕ (рассмотреть только если обосновано):")
+            for agent in CANDIDATE_AGENTS:
+                lines.append(f"  • {agent}")
+        else:
+            lines.append(
+                f"⚠️ РЕЖИМ НАБЛЮДЕНИЯ: оценённых сигналов {total_evaluated} из "
+                f"{MIN_EVALUATED_FOR_PROPOSALS}. НЕ предлагай hire/fire/modify. "
+                f"Только observe с указанием, сколько данных ждём."
+            )
 
-        prompt = "\n".join(lines)
+        return "\n".join(lines), total_evaluated, watch_mode
+
+    # ---------- Анализ ----------
+
+    def analyze(self) -> dict[str, Any]:
+        prompt, total_evaluated, watch_mode = self._build_context()
 
         raw = self.think(prompt=prompt, system=SYSTEM_PROMPT)
 
@@ -201,9 +229,18 @@ class AIArchitect(BaseAgent):
         if not isinstance(result, dict):
             raise ValueError("LLM вернула не объект")
 
+        proposals = result.get("proposals") or []
+
+        # Дополнительная защита: в режиме наблюдения оставляем только observe
+        if watch_mode:
+            proposals = [p for p in proposals if isinstance(p, dict)
+                         and p.get("proposal_type") == "observe"]
+
         return {
             "summary": str(result.get("summary", "")),
-            "proposals": result.get("proposals") or [],
+            "proposals": proposals,
+            "total_evaluated": total_evaluated,
+            "watch_mode": watch_mode,
         }
 
     # ---------- Сохранение ----------
@@ -249,11 +286,15 @@ class AIArchitect(BaseAgent):
             return {"error": str(e)}
 
         saved = self.save_proposals(analysis)
-        self.log.info(f"Сохранено предложений: {saved}")
+        self.log.info(
+            f"Сохранено: {saved} | режим: "
+            f"{'НАБЛЮДЕНИЕ' if analysis.get('watch_mode') else 'РАБОТА'}"
+        )
 
         return {
             "summary": analysis.get("summary"),
             "proposals": analysis.get("proposals"),
             "saved": saved,
             "total_evaluated": total_evaluated,
+            "watch_mode": analysis.get("watch_mode", True),
         }
