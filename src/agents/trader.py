@@ -1,4 +1,5 @@
-"""Trader-01 — первый агент компании. Принимает торговые решения."""
+"""Trader-01 — первый агент компании. Принимает торговые решения.
+Читает: цены, портфель, все отчёты аналитиков + Historical Analyst."""
 import json
 from datetime import datetime, timedelta
 from typing import Any
@@ -13,33 +14,44 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 Твоя задача: на основе рыночных цен, портфеля и ОТЧЁТОВ АНАЛИТИКОВ предложить ОДНО действие.
 
 ВАЖНО ПРО РЕЖИМ РАБОТЫ БИРЖ:
-- Акции РФ (MOEX): торгуются Пн–Пт 07:00–23:50 МСК. В выходные — закрыты.
-- Металлы (через MOEX): торгуются Пн–Пт. В выходные — закрыты.
-- КРИПТА (BTC, ETH, SOL, BNB): торгуется КРУГОСУТОЧНО 7 дней в неделю.
-  В выходные крипта ДОСТУПНА для торговли!
+- Акции РФ (MOEX): Пн–Пт 07:00–23:50 МСК. В выходные закрыты.
+- Металлы (через MOEX): Пн–Пт. В выходные закрыты.
+- КРИПТА (BTC, ETH, SOL, BNB, LINK, DOGE, SHIB, PEPE): торгуется КРУГЛОСУТОЧНО.
+  В выходные крипта ДОСТУПНА.
 
 ВАЖНО ПРО КОЛИЧЕСТВО:
-- Крипта может покупаться ДРОБНО. Например, 0.00028 BTC.
-- Акции — только целыми (7 акций, не 7.5).
-- Если не знаешь точное количество — ставь quantity: 0.
-  Risk Manager сам рассчитает размер по лимиту риска (20% капитала).
+- Крипта покупается ДРОБНО (например, 0.00028 BTC).
+- Акции — целыми (7 акций, не 7.5).
+- Если не знаешь точное количество — ставь quantity: 0. Risk Manager рассчитает по лимиту 20%.
 
-Правила:
+ПРИОРИТЕТ ИСТОЧНИКОВ (важно!):
+1. HISTORICAL — долгосрочный контекст (где мы в диапазоне 720 дней)
+2. CRYPTO / STOCK / METALS — оценки конкретных активов
+3. MARKET — общий тренд рынка
+4. NEWS — новостной фон
+
+ЛОГИКА ИСПОЛЬЗОВАНИЯ HISTORICAL:
+- Позиция в диапазоне < 20% (дно) + sentiment "bullish" → СИЛЬНЫЙ сигнал к покупке
+- Позиция 20-40% + sentiment "bullish" → умеренная покупка
+- Позиция 40-60% → нейтрально, ждём
+- Позиция 60-80% → осторожно
+- Позиция > 80% (пик) + sentiment "bearish" → продавать, НЕ покупать
+
+Комбинируй: если Historical говорит "дно, покупать" И Crypto score >= 7,
+это сильная возможность. Если они противоречат — приоритет Historical
+(долгосрочный контекст важнее краткосрочного).
+
+ОБЩИЕ ПРАВИЛА:
 - Все цены — в рублях.
 - Комиссия брокера: 0.05%.
-- Не рискуй более 20% капитала в одной сделке (Risk Manager проверит).
+- Не рискуй более 20% капитала в одной сделке.
 - При негативном новостном фоне — осторожнее с покупками.
-- При bearish-тренде — не покупай акции. Крипту можно при сигнале score >= 7.
+- При bearish-тренде рынка (Market) — не покупай акции.
 - Если хочешь остаться в деньгах — ticker "CASH", action "HOLD".
-
-Если есть отчёты аналитиков (Stock, Crypto, Metals) — учитывай их оценки (score 0-10):
-- score >= 7 — сильный сигнал
-- score 4-7 — нейтральный
-- score < 4 — избегай
 
 Отвечай СТРОГО в формате JSON:
 {
-  "ticker": "SBER" | "GAZP" | "BTC" | "ETH" | "SOL" | "BNB" | "GOLD" | "CASH",
+  "ticker": "SBER" | "GAZP" | "BTC" | "ETH" | "SOL" | "BNB" | "LINK" | "DOGE" | "SHIB" | "PEPE" | "GOLD" | "CASH",
   "action": "BUY" | "SELL" | "HOLD",
   "quantity": 0,
   "confidence": 0.0-1.0,
@@ -55,6 +67,8 @@ class Trader(BaseAgent):
 
     def __init__(self, name: str = "Trader-01") -> None:
         super().__init__(name=name, role="trader")
+
+    # ---------- Данные ----------
 
     def get_market_prices(self) -> dict[str, float]:
         cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
@@ -110,8 +124,29 @@ class Trader(BaseAgent):
         )
 
     def get_analysts_block(self) -> str:
+        """Сводка по всем аналитикам активов."""
         blocks = []
 
+        # --- Historical (в самом верху — важнее всего) ---
+        historical = db.fetch_all(
+            """SELECT DISTINCT ON (ticker) ticker, trend, sentiment, score,
+                      range_position, reasoning
+               FROM historical_reports
+               WHERE created_at >= NOW() - INTERVAL '24 hours'
+               ORDER BY ticker, created_at DESC;"""
+        )
+        if historical:
+            lines = ["=== HISTORICAL (долгосрочный контекст за 720 дней) ==="]
+            for h in historical:
+                lines.append(
+                    f"  • {h['ticker']}: {h['sentiment']} (score {h['score']}) "
+                    f"| позиция {h['range_position']}% | тренд {h['trend']}"
+                )
+                if h.get("reasoning"):
+                    lines.append(f"    {h['reasoning']}")
+            blocks.append("\n".join(lines))
+
+        # --- Stock ---
         stocks = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
                FROM stock_reports
@@ -119,11 +154,14 @@ class Trader(BaseAgent):
                ORDER BY ticker, created_at DESC;"""
         )
         if stocks:
-            lines = ["АКЦИИ РФ:"]
+            lines = ["=== АКЦИИ РФ ==="]
             for s in stocks:
-                lines.append(f"  • {s['ticker']}: {s['sentiment']} (score {s['score']}) — {s['reasoning']}")
+                lines.append(
+                    f"  • {s['ticker']}: {s['sentiment']} (score {s['score']}) — {s['reasoning']}"
+                )
             blocks.append("\n".join(lines))
 
+        # --- Crypto ---
         cryptos = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
                FROM crypto_reports
@@ -131,11 +169,14 @@ class Trader(BaseAgent):
                ORDER BY ticker, created_at DESC;"""
         )
         if cryptos:
-            lines = ["КРИПТОВАЛЮТЫ:"]
+            lines = ["=== КРИПТОВАЛЮТЫ ==="]
             for c in cryptos:
-                lines.append(f"  • {c['ticker']}: {c['sentiment']} (score {c['score']}) — {c['reasoning']}")
+                lines.append(
+                    f"  • {c['ticker']}: {c['sentiment']} (score {c['score']}) — {c['reasoning']}"
+                )
             blocks.append("\n".join(lines))
 
+        # --- Metals ---
         metals = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
                FROM metals_reports
@@ -143,15 +184,19 @@ class Trader(BaseAgent):
                ORDER BY ticker, created_at DESC;"""
         )
         if metals:
-            lines = ["ДРАГМЕТАЛЛЫ:"]
+            lines = ["=== ДРАГМЕТАЛЛЫ ==="]
             for m in metals:
-                lines.append(f"  • {m['ticker']}: {m['sentiment']} (score {m['score']}) — {m['reasoning']}")
+                lines.append(
+                    f"  • {m['ticker']}: {m['sentiment']} (score {m['score']}) — {m['reasoning']}"
+                )
             blocks.append("\n".join(lines))
 
         if not blocks:
             return "ОТЧЁТЫ АНАЛИТИКОВ: пока нет данных."
 
-        return "ОТЧЁТЫ АНАЛИТИКОВ:\n" + "\n\n".join(blocks)
+        return "ОТЧЁТЫ АНАЛИТИКОВ:\n\n" + "\n\n".join(blocks)
+
+    # ---------- Решение ----------
 
     def decide(self) -> dict[str, Any]:
         prices = self.get_market_prices()
@@ -182,8 +227,8 @@ Sentiment: {news['sentiment']}
         weekend_hint = ""
         if datetime.now().weekday() >= 5:
             weekend_hint = (
-                "\nВАЖНО: Сегодня выходной. MOEX закрыт — акции РФ и металлы не торгуются. "
-                "КРИПТА (BTC, ETH, SOL, BNB) ДОСТУПНА для торговли."
+                "\nВАЖНО: Сегодня выходной. MOEX закрыт — акции РФ и металлы недоступны. "
+                "КРИПТА ДОСТУПНА."
             )
 
         prompt = f"""Текущие цены (в рублях):
@@ -240,6 +285,8 @@ Sentiment: {news['sentiment']}
             raise ValueError(f"JSON parse error: {e}")
 
         return decision
+
+    # ---------- Основной цикл ----------
 
     def run(self) -> dict[str, Any]:
         self.log.info("Trader просыпается...")
