@@ -2,24 +2,20 @@
 и оценивает сигналы агентов. При добавлении нового агента — ничего
 в Auditor менять не надо."""
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Optional
 
 from src.core.database import db
 from src.core.logger import get_logger
 
 log = get_logger("auditor")
 
-# MOEX-корзина — для оценки макро-агентов (News, Market)
 MOEX_BASKET = ["SBER", "GAZP", "LKOH", "GMKN", "ROSN",
                "NVTK", "TATN", "SNGS", "PLZL", "MTSS"]
 BASKET_TICKER = "MOEX_BASKET"
 
-# Таблицы, которые НЕ надо обрабатывать как макро (это холдеры)
-SKIP_TABLES = {"market_reports"}  # market обрабатываем отдельно, по overall_trend
-
 LOOKBACK_DAYS = 60
 EVAL_WINDOW_DAYS = 3
-PRICE_MOVE_THRESHOLD = 0.5  # %
+PRICE_MOVE_THRESHOLD = 0.5
 
 
 class Auditor:
@@ -29,7 +25,6 @@ class Auditor:
     # ---------- Автодискаверинг таблиц ----------
 
     def _discover_report_tables(self) -> list[dict]:
-        """Находит все таблицы *_reports и определяет их структуру."""
         tables = db.fetch_all(
             """SELECT table_name
                FROM information_schema.tables
@@ -48,17 +43,15 @@ class Auditor:
             )
             cols = {c["column_name"] for c in cols_rows}
 
-            # Какие колонки есть?
             has_ticker = "ticker" in cols
             has_sentiment = "sentiment" in cols
             has_report_date = "report_date" in cols
             has_overall_trend = "overall_trend" in cols
 
             if not has_sentiment and not has_overall_trend:
-                continue  # нельзя оценить — нет sentiment
-
+                continue
             if not has_report_date:
-                continue  # нельзя оценить — нет даты
+                continue
 
             result.append({
                 "table": table,
@@ -166,7 +159,6 @@ class Auditor:
             return False
 
     def _insert_new_signals(self) -> dict:
-        """Автоматически проходит по всем *_reports и собирает сигналы."""
         cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
         tables = self._discover_report_tables()
         stats = {}
@@ -176,7 +168,6 @@ class Auditor:
             inserted = 0
 
             if t["has_ticker"] and t["has_sentiment"]:
-                # Тикерная таблица (Stock, Crypto, Metals, Historical)
                 try:
                     rows = db.fetch_all(
                         f"""SELECT agent_name, ticker, sentiment, report_date
@@ -199,7 +190,6 @@ class Auditor:
                         inserted += 1
 
             elif t["has_overall_trend"]:
-                # Market-подобная (overall_trend вместо sentiment)
                 try:
                     rows = db.fetch_all(
                         f"""SELECT agent_name, overall_trend, report_date
@@ -220,7 +210,6 @@ class Auditor:
                         inserted += 1
 
             elif t["has_sentiment"]:
-                # Макро (News) — sentiment positive/negative
                 try:
                     rows = db.fetch_all(
                         f"""SELECT agent_name, sentiment, report_date
@@ -445,62 +434,67 @@ class Auditor:
         }
 
     def get_account_stats(self) -> dict:
-    acc = db.fetch_one(
-        """SELECT cash, initial_capital, 
-                  COALESCE(total_deposits, 0) AS deposits 
-           FROM account WHERE id = 1;"""
-    )
-    if not acc:
-        return {"cash": 0, "assets": 0, "total": 0, "initial": 0,
-                "deposits": 0, "invested": 0, "pnl": 0, "pnl_pct": 0}
-
-    cash = float(acc["cash"])
-    initial = float(acc["initial_capital"])
-    deposits = float(acc["deposits"])
-    invested = initial + deposits
-
-    positions = db.fetch_all("SELECT ticker, quantity, avg_price FROM portfolio;")
-    assets_value = 0.0
-    for p in positions:
-        price_row = db.fetch_one(
-            """SELECT price FROM market_prices
-               WHERE ticker = %s ORDER BY updated_at DESC LIMIT 1;""",
-            (p["ticker"],),
+        acc = db.fetch_one(
+            """SELECT cash, initial_capital,
+                      COALESCE(total_deposits, 0) AS deposits
+               FROM account WHERE id = 1;"""
         )
-        if price_row:
-            assets_value += float(p["quantity"]) * float(price_row["price"])
-        else:
-            assets_value += float(p["quantity"]) * float(p["avg_price"])
+        if not acc:
+            return {"cash": 0, "assets": 0, "total": 0, "initial": 0,
+                    "deposits": 0, "invested": 0, "pnl": 0, "pnl_pct": 0}
 
-    total = cash + assets_value
-    pnl = total - invested
-    return {
-        "cash": cash,
-        "assets": assets_value,
-        "total": total,
-        "initial": initial,
-        "deposits": deposits,
-        "invested": invested,
-        "pnl": pnl,
-        "pnl_pct": pnl / invested * 100 if invested else 0,
-    }
+        cash = float(acc["cash"])
+        initial = float(acc["initial_capital"])
+        deposits = float(acc["deposits"])
+        invested = initial + deposits
+
+        positions = db.fetch_all("SELECT ticker, quantity, avg_price FROM portfolio;")
+        assets_value = 0.0
+        for p in positions:
+            price_row = db.fetch_one(
+                """SELECT price FROM market_prices
+                   WHERE ticker = %s ORDER BY updated_at DESC LIMIT 1;""",
+                (p["ticker"],),
+            )
+            if price_row:
+                assets_value += float(p["quantity"]) * float(price_row["price"])
+            else:
+                assets_value += float(p["quantity"]) * float(p["avg_price"])
+
+        total = cash + assets_value
+        pnl = total - invested
+        return {
+            "cash": cash,
+            "assets": assets_value,
+            "total": total,
+            "initial": initial,
+            "deposits": deposits,
+            "invested": invested,
+            "pnl": pnl,
+            "pnl_pct": pnl / invested * 100 if invested else 0,
+        }
+
+    # ---------- Отчёт ----------
 
     def build_report(self) -> str:
         lines = ["📊 *АУДИТ — эффективность агентов*", ""]
 
         acc = self.get_account_stats()
-pnl_emoji = "🟢" if acc["pnl"] >= 0 else "🔴"
-invested_text = f"{acc['invested']:,.0f} ₽"
-if acc.get("deposits", 0) > 0:
-    invested_text += f" (старт {acc['initial']:,.0f} + пополнения {acc['deposits']:,.0f})"
+        pnl_emoji = "🟢" if acc["pnl"] >= 0 else "🔴"
 
-lines.append("💰 *КАПИТАЛ*")
-lines.append(f"• Свободные: {acc['cash']:,.2f} ₽")
-lines.append(f"• В активах: {acc['assets']:,.2f} ₽")
-lines.append(f"• *Итого: {acc['total']:,.2f} ₽*")
-lines.append(f"💵 Вложено: {invested_text}")
-lines.append(f"{pnl_emoji} P/L: {acc['pnl']:+,.2f} ₽ ({acc['pnl_pct']:+.2f}%)")
-lines.append("")
+        invested_text = f"{acc['invested']:,.0f} ₽"
+        if acc.get("deposits", 0) > 0:
+            invested_text += (
+                f" (старт {acc['initial']:,.0f} + пополнения {acc['deposits']:,.0f})"
+            )
+
+        lines.append("💰 *КАПИТАЛ*")
+        lines.append(f"• Свободные: {acc['cash']:,.2f} ₽")
+        lines.append(f"• В активах: {acc['assets']:,.2f} ₽")
+        lines.append(f"• *Итого: {acc['total']:,.2f} ₽*")
+        lines.append(f"💵 Вложено: {invested_text}")
+        lines.append(f"{pnl_emoji} P/L: {acc['pnl']:+,.2f} ₽ ({acc['pnl_pct']:+.2f}%)")
+        lines.append("")
 
         lines.append("👥 *ЭФФЕКТИВНОСТЬ АГЕНТОВ*")
         agents = self.get_agent_stats()
@@ -540,7 +534,7 @@ lines.append("")
 
     # ---------- Запуск ----------
 
-    def run_daily(self) -> dict[str, Any]:
+    def run_daily(self) -> dict:
         log.info("Auditor daily запускается...")
         sig_stats = self._insert_new_signals()
         evaluated_signals = self._evaluate_pending_signals()
@@ -558,7 +552,7 @@ lines.append("")
             "trades_evaluated": evaluated_trades,
         }
 
-    def run_weekly(self) -> dict[str, Any]:
+    def run_weekly(self) -> dict:
         log.info("Auditor weekly — формируем отчёт")
         self.run_daily()
         report = self.build_report()
