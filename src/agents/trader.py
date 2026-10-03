@@ -1,7 +1,7 @@
 """Trader-01 — первый агент компании."""
 import json
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 
 from src.agents.base import BaseAgent
 from src.core.database import db
@@ -11,6 +11,9 @@ from src.risk.risk_manager import risk_manager
 
 SYSTEM_PROMPT = """Ты — профессиональный трейдер виртуальной инвестиционной компании.
 Твоя задача: на основе рыночных цен, портфеля и ОТЧЁТОВ АНАЛИТИКОВ предложить ОДНО действие.
+
+⚠️ ЯЗЫК ОТВЕТА: ТОЛЬКО РУССКИЙ. Никаких слов на других языках
+(английский, польский, украинский и т.д.). Даже технические термины — по-русски.
 
 ВАЖНО ПРО РЕЖИМ РАБОТЫ:
 - Акции РФ (MOEX): Пн–Пт 07:00–23:50 МСК. В выходные закрыты.
@@ -23,7 +26,17 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 - SOL, BNB, LINK и все акции (Tier 2): максимум 5% капитала.
 - DOGE, SHIB, PEPE, WIF, BONK (Tier 3): максимум 3% капитала.
 - Не более 2 активов из одной группы.
+- После продажи тикера — 24 часа не покупать снова.
 - Дневной убыток 5% — полная блокировка торговли.
+
+🔴 КРИТИЧНО ПРО СВЕЖЕСТЬ ДАННЫХ:
+Каждый отчёт помечен возрастом:
+- «свежий» (<6ч) → доверяй полностью
+- «устаревший» (6-24ч) → учитывай с осторожностью, снижай confidence на 0.1
+- «очень старый» (>24ч) → НЕ учитывай, игнорируй
+
+Если данных нет вообще — принимай решение на основе того, что есть,
+и указывай в reasoning, что работал без части аналитики.
 
 ПРИОРИТЕТ ИСТОЧНИКОВ:
 1. МАКРО РЕЖИМ — среда (tight/neutral/loose)
@@ -38,7 +51,7 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 - Позиция >80% (пик) + bearish → продажа
 
 ПРАВИЛА SELL:
-- BTC и ETH НЕ ПРОДАЁМ в убыток — только при прибыли ≥20% или если цена на пике (позиция >85%).
+- BTC и ETH НЕ ПРОДАЁМ в убыток — только при прибыли ≥20% или пик >85%.
 - Мемкоины и альткоины — обычный стоп-лосс (10-15%).
 
 ОБЩЕЕ:
@@ -59,6 +72,7 @@ SYSTEM_PROMPT = """Ты — профессиональный трейдер ви
 
 MAX_DATA_AGE_HOURS = 6
 COOLDOWN_HOURS = 24
+REPORT_MAX_AGE_HOURS = 24  # старше — не передаём в LLM
 
 FALLBACK_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
@@ -71,6 +85,28 @@ FALLBACK_MODELS = [
 ]
 
 
+def _age_hours(timestamp) -> Optional[float]:
+    """Возраст данных в часах."""
+    if timestamp is None:
+        return None
+    try:
+        delta = datetime.now() - timestamp
+        return delta.total_seconds() / 3600
+    except Exception:
+        return None
+
+
+def _freshness_label(age: Optional[float]) -> str:
+    """Метка свежести по возрасту."""
+    if age is None:
+        return "возраст неизвестен"
+    if age < 6:
+        return f"свежий, {age:.0f}ч"
+    if age < 24:
+        return f"устаревший, {age:.0f}ч"
+    return f"очень старый, {age:.0f}ч"
+
+
 class Trader(BaseAgent):
     DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
@@ -80,7 +116,6 @@ class Trader(BaseAgent):
     # ---------- Данные ----------
 
     def get_cooldown_tickers(self) -> set[str]:
-        """Тикеры, которые нельзя покупать (<24ч после продажи)."""
         cutoff = datetime.now() - timedelta(hours=COOLDOWN_HOURS)
         rows = db.fetch_all(
             """SELECT DISTINCT ticker FROM trades
@@ -126,86 +161,94 @@ class Trader(BaseAgent):
         row = db.fetch_one("SELECT cash FROM account WHERE id = 1;")
         return float(row["cash"]) if row else 0.0
 
-    def get_latest_news(self) -> dict[str, Any] | None:
-        return db.fetch_one(
-            """SELECT summary, sentiment, confidence, created_at
-               FROM news_reports ORDER BY created_at DESC LIMIT 1;"""
-        )
-
-    def get_latest_market(self) -> dict[str, Any] | None:
-        return db.fetch_one(
-            """SELECT summary, overall_trend, volatility_level, confidence, created_at
-               FROM market_reports ORDER BY created_at DESC LIMIT 1;"""
-        )
-
     def get_analysts_block(self) -> str:
         blocks = []
 
+        # --- MACRO ---
         macro = db.fetch_one(
             """SELECT regime, key_rate, inflation, usd_rub, brent,
-                      summary, implications
+                      summary, implications, created_at
                FROM macro_reports
-               WHERE created_at >= NOW() - INTERVAL '24 hours'
+               WHERE created_at >= NOW() - INTERVAL '48 hours'
                ORDER BY created_at DESC LIMIT 1;"""
         )
         if macro:
-            lines = [f"=== МАКРО РЕЖИМ: {macro['regime'].upper()} ==="]
-            lines.append(f"Ставка ЦБ: {macro['key_rate']}% | Инфляция: {macro['inflation']}%")
-            lines.append(f"USD/RUB: {macro['usd_rub']:.2f} | Brent: ${macro['brent']}")
-            lines.append(f"Вывод: {macro['summary']}")
-            try:
-                impls = json.loads(macro["implications"]) if macro["implications"] else []
-                if impls:
-                    lines.append("Влияние на сектора:")
-                    for i in impls:
-                        if isinstance(i, dict):
-                            lines.append(f"  • {i.get('sector')}: {i.get('outlook')}")
-            except Exception:
-                pass
-            blocks.append("\n".join(lines))
+            age = _age_hours(macro["created_at"])
+            if age is not None and age <= REPORT_MAX_AGE_HOURS:
+                label = _freshness_label(age)
+                lines = [f"=== МАКРО РЕЖИМ ({label}): {macro['regime'].upper()} ==="]
+                lines.append(f"Ставка ЦБ: {macro['key_rate']}% | Инфляция: {macro['inflation']}%")
+                lines.append(f"USD/RUB: {macro['usd_rub']:.2f} | Brent: ${macro['brent']}")
+                lines.append(f"Вывод: {macro['summary']}")
+                try:
+                    impls = json.loads(macro["implications"]) if macro["implications"] else []
+                    if impls:
+                        lines.append("Влияние на сектора:")
+                        for i in impls:
+                            if isinstance(i, dict):
+                                lines.append(f"  • {i.get('sector')}: {i.get('outlook')}")
+                except Exception:
+                    pass
+                blocks.append("\n".join(lines))
 
+        # --- HISTORICAL ---
         historical = db.fetch_all(
             """SELECT DISTINCT ON (ticker) ticker, trend, sentiment, score,
-                      range_position, reasoning
+                      range_position, created_at
                FROM historical_reports
-               WHERE created_at >= NOW() - INTERVAL '24 hours'
+               WHERE created_at >= NOW() - INTERVAL '48 hours'
                ORDER BY ticker, created_at DESC;"""
         )
         if historical:
             lines = ["=== HISTORICAL (720 дней) ==="]
             for h in historical:
-                lines.append(
-                    f"  • {h['ticker']}: {h['sentiment']} (score {h['score']}) "
-                    f"| позиция {h['range_position']}% | тренд {h['trend']}"
-                )
-            blocks.append("\n".join(lines))
+                age = _age_hours(h["created_at"])
+                if age is not None and age <= REPORT_MAX_AGE_HOURS:
+                    label = _freshness_label(age)
+                    lines.append(
+                        f"  • {h['ticker']}: {h['sentiment']} (score {h['score']}) "
+                        f"| позиция {h['range_position']}% | {label}"
+                    )
+            if len(lines) > 1:
+                blocks.append("\n".join(lines))
 
+        # --- STOCK ---
         stocks = db.fetch_all(
-            """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
+            """SELECT DISTINCT ON (ticker) ticker, sentiment, score, created_at
                FROM stock_reports
-               WHERE created_at >= NOW() - INTERVAL '24 hours'
+               WHERE created_at >= NOW() - INTERVAL '48 hours'
                ORDER BY ticker, created_at DESC;"""
         )
         if stocks:
             lines = ["=== АКЦИИ РФ ==="]
             for s in stocks:
-                lines.append(f"  • {s['ticker']}: {s['sentiment']} ({s['score']})")
-            blocks.append("\n".join(lines))
+                age = _age_hours(s["created_at"])
+                if age is not None and age <= REPORT_MAX_AGE_HOURS:
+                    label = _freshness_label(age)
+                    lines.append(f"  • {s['ticker']}: {s['sentiment']} ({s['score']}) | {label}")
+            if len(lines) > 1:
+                blocks.append("\n".join(lines))
 
+        # --- CRYPTO ---
         cryptos = db.fetch_all(
-            """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
+            """SELECT DISTINCT ON (ticker) ticker, sentiment, score, created_at
                FROM crypto_reports
-               WHERE created_at >= NOW() - INTERVAL '24 hours'
+               WHERE created_at >= NOW() - INTERVAL '48 hours'
                ORDER BY ticker, created_at DESC;"""
         )
         if cryptos:
             lines = ["=== КРИПТА ==="]
             for c in cryptos:
-                lines.append(f"  • {c['ticker']}: {c['sentiment']} ({c['score']})")
-            blocks.append("\n".join(lines))
+                age = _age_hours(c["created_at"])
+                if age is not None and age <= REPORT_MAX_AGE_HOURS:
+                    label = _freshness_label(age)
+                    lines.append(f"  • {c['ticker']}: {c['sentiment']} ({c['score']}) | {label}")
+            if len(lines) > 1:
+                blocks.append("\n".join(lines))
 
+        # --- METALS ---
         metals = db.fetch_all(
-            """SELECT DISTINCT ON (ticker) ticker, sentiment, score, reasoning
+            """SELECT DISTINCT ON (ticker) ticker, sentiment, score, created_at
                FROM metals_reports
                WHERE created_at >= NOW() - INTERVAL '48 hours'
                ORDER BY ticker, created_at DESC;"""
@@ -213,20 +256,59 @@ class Trader(BaseAgent):
         if metals:
             lines = ["=== МЕТАЛЛЫ ==="]
             for m in metals:
-                lines.append(f"  • {m['ticker']}: {m['sentiment']} ({m['score']})")
-            blocks.append("\n".join(lines))
+                age = _age_hours(m["created_at"])
+                if age is not None and age <= REPORT_MAX_AGE_HOURS:
+                    label = _freshness_label(age)
+                    lines.append(f"  • {m['ticker']}: {m['sentiment']} ({m['score']}) | {label}")
+            if len(lines) > 1:
+                blocks.append("\n".join(lines))
+
+        # --- NEWS ---
+        news = db.fetch_one(
+            """SELECT summary, sentiment, confidence, created_at
+               FROM news_reports
+               WHERE created_at >= NOW() - INTERVAL '48 hours'
+               ORDER BY created_at DESC LIMIT 1;"""
+        )
+        if news:
+            age = _age_hours(news["created_at"])
+            if age is not None and age <= REPORT_MAX_AGE_HOURS:
+                label = _freshness_label(age)
+                blocks.append(
+                    f"=== НОВОСТИ ({label}) ===\n"
+                    f"Sentiment: {news['sentiment']}\n{news['summary'][:500]}"
+                )
+
+        # --- MARKET ---
+        market = db.fetch_one(
+            """SELECT summary, overall_trend, volatility_level, created_at
+               FROM market_reports
+               WHERE created_at >= NOW() - INTERVAL '48 hours'
+               ORDER BY created_at DESC LIMIT 1;"""
+        )
+        if market:
+            age = _age_hours(market["created_at"])
+            if age is not None and age <= REPORT_MAX_AGE_HOURS:
+                label = _freshness_label(age)
+                blocks.append(
+                    f"=== РЫНОК ({label}) ===\n"
+                    f"Тренд: {market['overall_trend']}\n"
+                    f"Волатильность: {market['volatility_level']}\n"
+                    f"{market['summary'][:500]}"
+                )
 
         if not blocks:
-            return "ОТЧЁТЫ АНАЛИТИКОВ: нет данных."
+            return "ОТЧЁТЫ АНАЛИТИКОВ: нет свежих данных (все старше 24ч)."
 
         return "ОТЧЁТЫ АНАЛИТИКОВ:\n\n" + "\n\n".join(blocks)
+
+    # ---------- Решение ----------
 
     def decide(self) -> dict[str, Any]:
         prices = self.get_market_prices()
         if not prices:
             raise RuntimeError("Нет свежих рыночных данных")
 
-        # Исключаем тикеры в cooldown (нельзя покупать <24ч после продажи)
         cooldown = self.get_cooldown_tickers()
         if cooldown:
             self.log.info(f"В cooldown: {cooldown} — исключаем из BUY")
@@ -234,20 +316,7 @@ class Trader(BaseAgent):
 
         portfolio = self.get_portfolio()
         cash = self.get_cash()
-        news = self.get_latest_news()
-        market = self.get_latest_market()
         analysts_block = self.get_analysts_block()
-
-        news_block = "НОВОСТИ: нет данных."
-        if news:
-            news_block = f"НОВОСТИ:\nSentiment: {news['sentiment']}\n{news['summary']}"
-
-        market_block = "РЫНОК: нет данных."
-        if market:
-            market_block = (
-                f"РЫНОК:\nТренд: {market['overall_trend']}\n"
-                f"Волатильность: {market['volatility_level']}\n{market['summary']}"
-            )
 
         weekend_hint = ""
         if datetime.now().weekday() >= 5:
@@ -257,7 +326,7 @@ class Trader(BaseAgent):
         if cooldown:
             cooldown_hint = (
                 f"\nВАЖНО: Тикеры {', '.join(cooldown)} в cooldown после недавней продажи. "
-                f"Их НЕ покупать в течение 24ч. В списке цен их уже нет."
+                f"Их НЕ покупать. В списке цен их уже нет."
             )
 
         prompt = f"""Цены (₽):
@@ -268,14 +337,10 @@ class Trader(BaseAgent):
 
 Свободные деньги: {cash:.2f} ₽
 
-{news_block}
-
-{market_block}
-
 {analysts_block}
 {weekend_hint}{cooldown_hint}
 
-Что делаем? Отвечай JSON без пояснений."""
+Что делаем? Отвечай JSON без пояснений. ТОЛЬКО НА РУССКОМ."""
 
         last_error = None
         for model in FALLBACK_MODELS:
