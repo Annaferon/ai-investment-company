@@ -1,5 +1,5 @@
 """Risk Manager — комплексная защита капитала.
-Tier-система, дневной лимит, корреляция, cooldown."""
+Tier-система, целевые пропорции, cooldown, дневной лимит."""
 import json
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -15,36 +15,57 @@ MAX_DAILY_LOSS_PCT = 5.0
 MIN_TRADE_SIZE = 500.0
 MAX_DATA_AGE_HOURS = 6
 
-# ---------- Tier-система ----------
+# ---------- Целевые пропорции портфеля (по капиталу) ----------
+TARGET_STOCK_PCT = 0.40      # 40% в акциях РФ
+TARGET_METALS_PCT = 0.10     # 10% в металлах
+TARGET_CRYPTO_PCT = 0.30     # 30% в крипте
+TARGET_CASH_PCT = 0.20       # 20% в кэше
+
+# ---------- Буферы (макс. превышение целевой доли) ----------
+STOCK_MAX_PCT = 0.50         # Макс 50% в акциях
+METALS_MAX_PCT = 0.15        # Макс 15% в металлах
+CRYPTO_MAX_PCT = 0.40        # Макс 40% в крипте
+CASH_MIN_PCT = 0.10          # Мин 10% кэша после сделки
+
+# ---------- Лимиты количества позиций ----------
+MAX_STOCK_POSITIONS = 8
+MAX_CRYPTO_POSITIONS = 6
+MAX_METALS_POSITIONS = 2
+
+# ---------- Tier-система (для крипты) ----------
 TIER1 = {"BTC", "ETH"}
 TIER2 = {"SOL", "BNB", "LINK"}
 TIER3 = {"DOGE", "SHIB", "PEPE", "WIF", "BONK"}
 
+# Лимиты позиций по тирам (в % от капитала)
 TIER1_MAX_POSITION_PCT = 0.15
-TIER1_MAX_PORTFOLIO_PCT = 0.50
-TIER1_STOP_LOSS_PCT = 0.30
-TIER1_TAKE_PROFIT_PCT = 0.20
-TIER1_PEAK_TO_SELL = 85.0
-
 TIER2_MAX_POSITION_PCT = 0.05
-TIER2_MAX_PORTFOLIO_PCT = 0.30
-TIER2_STOP_LOSS_PCT = 0.15
-TIER2_TAKE_PROFIT_PCT = 0.25
-
 TIER3_MAX_POSITION_PCT = 0.03
-TIER3_MAX_PORTFOLIO_PCT = 0.10
+
+# Стоп-лоссы
+TIER1_STOP_LOSS_PCT = 0.30
+TIER2_STOP_LOSS_PCT = 0.15
 TIER3_STOP_LOSS_PCT = 0.10
+
+# Тейк-профиты
+TIER1_TAKE_PROFIT_PCT = 0.20
+TIER2_TAKE_PROFIT_PCT = 0.25
 TIER3_TAKE_PROFIT_PCT = 0.30
 
+TIER1_PEAK_TO_SELL = 85.0
+
+# ---------- Корреляция ----------
 CORRELATION_GROUPS = {
     "bitcoin_ecosystem": {"BTC", "ETH", "SOL", "BNB"},
     "memecoins": {"DOGE", "SHIB", "PEPE", "WIF", "BONK"},
 }
 
+# ---------- Cooldown ----------
 COOLDOWN_HOURS = 24
 
-MAX_CRYPTO_POSITIONS = 5
-MAX_STOCK_POSITIONS = 3
+# Классификация тикеров по классам
+STOCK_TICKERS = {"SBER", "GAZP", "LKOH", "GMKN", "ROSN", "NVTK", "TATN", "SNGS", "PLZL", "MTSS"}
+METAL_TICKERS = {"GOLD", "SILVER"}
 
 
 def _tier(ticker: str) -> int:
@@ -54,7 +75,18 @@ def _tier(ticker: str) -> int:
         return 2
     if ticker in TIER3:
         return 3
-    return 2
+    return 2  # акции и металлы как Tier 2
+
+
+def _asset_class(ticker: str) -> str:
+    """Возвращает класс актива: stock / metal / crypto / unknown."""
+    if ticker in STOCK_TICKERS:
+        return "stock"
+    if ticker in METAL_TICKERS:
+        return "metal"
+    if ticker in (TIER1 | TIER2 | TIER3):
+        return "crypto"
+    return "unknown"
 
 
 class RiskManager:
@@ -67,6 +99,14 @@ class RiskManager:
         row = db.fetch_one("SELECT cash FROM account WHERE id = 1;")
         return float(row["cash"]) if row else 0.0
 
+    def _get_position_price(self, ticker: str) -> Optional[float]:
+        row = db.fetch_one(
+            """SELECT price FROM market_prices
+               WHERE ticker = %s ORDER BY updated_at DESC LIMIT 1;""",
+            (ticker,),
+        )
+        return float(row["price"]) if row else None
+
     def _get_capital(self) -> float:
         acc = db.fetch_one("SELECT cash FROM account WHERE id = 1;")
         if not acc:
@@ -75,14 +115,10 @@ class RiskManager:
         positions = db.fetch_all("SELECT ticker, quantity, avg_price FROM portfolio;")
         assets = 0.0
         for p in positions:
-            price_row = db.fetch_one(
-                """SELECT price FROM market_prices
-                   WHERE ticker = %s ORDER BY updated_at DESC LIMIT 1;""",
-                (p["ticker"],),
-            )
-            assets += float(p["quantity"]) * (
-                float(price_row["price"]) if price_row else float(p["avg_price"])
-            )
+            price = self._get_position_price(p["ticker"])
+            if price is None:
+                price = float(p["avg_price"])
+            assets += float(p["quantity"]) * price
         return cash + assets
 
     def _get_position(self, ticker: str) -> Optional[dict]:
@@ -99,14 +135,6 @@ class RiskManager:
             (ticker, cutoff),
         )
         return row is not None
-
-    def _get_asset_type(self, ticker: str) -> str:
-        row = db.fetch_one(
-            """SELECT asset_type FROM market_prices
-               WHERE ticker = %s ORDER BY updated_at DESC LIMIT 1;""",
-            (ticker,),
-        )
-        return row["asset_type"] if row else "stock"
 
     def _get_historical_position(self, ticker: str) -> Optional[float]:
         row = db.fetch_one(
@@ -130,25 +158,23 @@ class RiskManager:
         return db.fetch_all("SELECT ticker, quantity FROM portfolio;")
 
     def _position_value(self, ticker: str, qty: float) -> float:
-        row = db.fetch_one(
-            """SELECT price FROM market_prices
-               WHERE ticker = %s ORDER BY updated_at DESC LIMIT 1;""",
-            (ticker,),
-        )
-        return float(row["price"]) * qty if row else 0.0
+        price = self._get_position_price(ticker)
+        return (price or 0.0) * qty
 
-    def _get_tier_exposure(self, tier: int) -> float:
+    def _get_class_exposure(self, asset_class: str) -> dict:
+        """Возвращает долю класса в капитале и количество позиций."""
         positions = self._get_portfolio_positions()
         total = 0.0
+        count = 0
         for p in positions:
-            if _tier(p["ticker"]) == tier:
+            cls = _asset_class(p["ticker"])
+            if cls == asset_class:
                 total += self._position_value(p["ticker"], float(p["quantity"]))
-        return total
+                count += 1
+        return {"value": total, "count": count}
 
     def _get_daily_loss(self) -> float:
-        """Текущий % дневного P/L к вложенному капиталу."""
         capital_now = self._get_capital()
-
         acc = db.fetch_one(
             """SELECT initial_capital,
                       COALESCE(total_deposits, 0) AS deposits
@@ -204,8 +230,8 @@ class RiskManager:
         if price <= 0:
             return self._reject(decision, "no_price", ["missing_price"])
 
+        asset_class = _asset_class(ticker)
         tier = _tier(ticker)
-        asset_type = self._get_asset_type(ticker)
         capital = self._get_capital()
         daily_loss = self._get_daily_loss()
 
@@ -227,74 +253,121 @@ class RiskManager:
                     ["cooldown"], tier=tier,
                 )
 
-            if tier == 1:
-                max_pos_pct = TIER1_MAX_POSITION_PCT
-                max_tier_pct = TIER1_MAX_PORTFOLIO_PCT
-            elif tier == 2:
-                max_pos_pct = TIER2_MAX_POSITION_PCT
-                max_tier_pct = TIER2_MAX_PORTFOLIO_PCT
+            # 1. Проверка целевого класса
+            class_data = self._get_class_exposure(asset_class)
+            class_value = class_data["value"]
+            class_count = class_data["count"]
+
+            if asset_class == "stock":
+                max_pct = STOCK_MAX_PCT
+                max_positions = MAX_STOCK_POSITIONS
+            elif asset_class == "metal":
+                max_pct = METALS_MAX_PCT
+                max_positions = MAX_METALS_POSITIONS
+            elif asset_class == "crypto":
+                max_pct = CRYPTO_MAX_PCT
+                max_positions = MAX_CRYPTO_POSITIONS
             else:
-                max_pos_pct = TIER3_MAX_POSITION_PCT
-                max_tier_pct = TIER3_MAX_PORTFOLIO_PCT
+                max_pct = 0.10
+                max_positions = 5
 
-            max_cost = capital * max_pos_pct
-            precision = 8 if asset_type == "crypto" else 0
-            max_qty = round(max_cost / price, precision) if price > 0 else 0
-
-            if quantity <= 0:
-                quantity = max_qty
-                rules.append(f"auto_quantity ({quantity})")
-
-            if quantity > max_qty:
-                quantity = max_qty
-                rules.append(f"tier{tier}_position_limit (→{quantity})")
-
-            cost = quantity * price
-
-            if cost < MIN_TRADE_SIZE:
-                min_qty = round(MIN_TRADE_SIZE / price + 10 ** (-precision), precision)
-                if min_qty > max_qty or min_qty * price > self._get_cash():
-                    return self._reject(
-                        decision,
-                        f"min {MIN_TRADE_SIZE}₽ не влезает в tier{tier} ({max_cost:.0f}₽)",
-                        ["min_trade_size"], tier=tier,
-                    )
-                quantity = min_qty
-                rules.append(f"min_trade_size ({quantity})")
-
-            tier_exposure = self._get_tier_exposure(tier)
-            new_tier_pct = (tier_exposure + cost) / capital * 100 if capital > 0 else 0
-            if new_tier_pct > max_tier_pct * 100:
+            # 2. Лимит количества позиций в классе
+            existing_tickers = {p["ticker"] for p in self._get_portfolio_positions()}
+            if ticker not in existing_tickers and class_count >= max_positions:
                 return self._reject(
                     decision,
-                    f"лимит tier{tier} {max_tier_pct*100:.0f}% превышен",
-                    [f"tier{tier}_portfolio_limit"], tier=tier,
+                    f"лимит {max_positions} позиций в классе {asset_class}",
+                    [f"max_{asset_class}_positions"],
+                    tier=tier,
                 )
 
-            for group_name, group_tickers in CORRELATION_GROUPS.items():
-                if ticker in group_tickers:
-                    group_positions = [
-                        p for p in self._get_portfolio_positions()
-                        if p["ticker"] in group_tickers and p["ticker"] != ticker
-                    ]
-                    if len(group_positions) >= 2:
-                        return self._reject(
-                            decision,
-                            f"корреляционный лимит ({group_name})",
-                            ["correlation_limit"], tier=tier,
-                        )
+            # 3. Лимит на позицию (Tier для крипты, 5% для остальных)
+            if asset_class == "crypto":
+                if tier == 1:
+                    max_pos_pct = TIER1_MAX_POSITION_PCT
+                elif tier == 2:
+                    max_pos_pct = TIER2_MAX_POSITION_PCT
+                else:
+                    max_pos_pct = TIER3_MAX_POSITION_PCT
+            elif asset_class == "stock":
+                max_pos_pct = 0.05  # 5% на акцию
+            elif asset_class == "metal":
+                max_pos_pct = 0.07  # 7% на металл
+            else:
+                max_pos_pct = 0.05
 
-            by_type = self._get_portfolio_positions()
-            existing = {p["ticker"] for p in by_type}
+            max_position_value = capital * max_pos_pct
+            precision = 8 if asset_class == "crypto" else 0
 
-            crypto_count = len([p for p in by_type if p["ticker"] in (TIER1 | TIER2 | TIER3)])
-            stock_count = len([p for p in by_type if p["ticker"] not in (TIER1 | TIER2 | TIER3)])
+            if quantity <= 0:
+                quantity = round(max_position_value / price, precision)
+                rules.append(f"auto_quantity ({quantity})")
 
-            if ticker not in existing:
-                if asset_type == "crypto" and crypto_count >= MAX_CRYPTO_POSITIONS:
-                    return self._reject(decision, f"лимит {MAX_CRYPTO_POSITIONS} крипто", ["max_crypto"], tier=tier)
-                if asset_type == "stock" and stock_count >= MAX_STOCK_POSITIONS:
-                    return self._reject(decision, f"лимит {MAX_STOCK_POSITIONS} акций", ["max_stocks"], tier=tier)
+            position_cost = quantity * price
+            if position_cost > max_position_value:
+                quantity = round(max_position_value / price, precision)
+                position_cost = quantity * price
+                rules.append(f"position_limit_{max_pos_pct*100:.0f}% (→{quantity})")
+
+            # 4. Лимит класса
+            new_class_pct = (class_value + position_cost) / capital if capital > 0 else 0
+            if new_class_pct > max_pct:
+                return self._reject(
+                    decision,
+                    f"лимит класса {asset_class} {max_pct*100:.0f}% превышен "
+                    f"(сейчас {class_value/capital*100:.1f}%)",
+                    [f"{asset_class}_portfolio_limit"],
+                    tier=tier,
+                )
+
+            # 5. Мин. сумма сделки
+            if position_cost < MIN_TRADE_SIZE:
+                min_qty = round(MIN_TRADE_SIZE / price + 10 ** (-precision), precision)
+                min_cost = min_qty * price
+                new_class_pct_min = (class_value + min_cost) / capital if capital > 0 else 0
+                if min_cost > max_position_value or new_class_pct_min > max_pct:
+                    return self._reject(
+                        decision,
+                        f"min {MIN_TRADE_SIZE}₽ не влезает в лимиты",
+                        ["min_trade_size"],
+                        tier=tier,
+                    )
+                quantity = min_qty
+                position_cost = min_cost
+                rules.append(f"min_trade_size ({quantity})")
+
+            # 6. Кэш-минимум
+            cash = self._get_cash()
+            cash_after = cash - position_cost
+            cash_pct_after = cash_after / capital if capital > 0 else 0
+            if cash_pct_after < CASH_MIN_PCT:
+                max_spend = cash - capital * CASH_MIN_PCT
+                if max_spend < MIN_TRADE_SIZE:
+                    return self._reject(
+                        decision,
+                        f"кэш не может упасть ниже {CASH_MIN_PCT*100:.0f}%",
+                        ["cash_reserve"],
+                        tier=tier,
+                    )
+                quantity = round(max_spend / price, precision)
+                position_cost = quantity * price
+                rules.append(f"cash_reserve_limit (→{quantity})")
+
+            # 7. Корреляция (для крипты)
+            if asset_class == "crypto":
+                for group_name, group_tickers in CORRELATION_GROUPS.items():
+                    if ticker in group_tickers:
+                        group_positions = [
+                            p for p in self._get_portfolio_positions()
+                            if p["ticker"] in group_tickers and p["ticker"] != ticker
+                        ]
+                        if len(group_positions) >= 2:
+                            return self._reject(
+                                decision,
+                                f"корреляционный лимит ({group_name})",
+                                ["correlation_limit"],
+                                tier=tier,
+                            )
 
             decision = {**decision, "quantity": quantity, "price": price}
             was_adjusted = bool(rules)
