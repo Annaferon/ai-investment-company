@@ -12,27 +12,49 @@ log = get_logger("reporter")
 TG_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
+def _fmt_qty(qty: float) -> str:
+    """Форматирование количества."""
+    if qty >= 1:
+        return f"{qty:,.2f}"
+    return f"{qty:.8f}".rstrip("0").rstrip(".")
+
+
+def _fmt_price(price: float) -> str:
+    """Умное форматирование цены — больше знаков для дешёвых активов."""
+    if price >= 1000:
+        return f"{price:,.2f}"
+    if price >= 1:
+        return f"{price:.4f}"
+    if price >= 0.01:
+        return f"{price:.6f}"
+    return f"{price:.10f}"
+
+
+def _fmt_money(value: float) -> str:
+    """Форматирование суммы в рублях."""
+    return f"{value:,.2f}"
+
+
 def get_daily_stats() -> dict:
     period_end = datetime.now()
     period_start = period_end - timedelta(hours=24)
 
-    # Кэш + вложенный капитал
     acc = db.fetch_one(
-        "SELECT cash, initial_capital, COALESCE(total_deposits, 0) AS deposits FROM account WHERE id = 1;"
+        """SELECT cash, initial_capital,
+                  COALESCE(total_deposits, 0) AS deposits
+           FROM account WHERE id = 1;"""
     )
     cash = float(acc["cash"]) if acc else 0.0
     initial = float(acc["initial_capital"]) if acc else 0.0
     deposits = float(acc["deposits"]) if acc else 0.0
     invested_capital = initial + deposits
 
-    # USD/RUB
     usd_row = db.fetch_one(
         """SELECT price FROM market_prices
            WHERE ticker = 'USD_RUB' ORDER BY updated_at DESC LIMIT 1;"""
     )
     usd_rub = float(usd_row["price"]) if usd_row else 90.0
 
-    # Цены
     price_rows = db.fetch_all(
         """SELECT DISTINCT ON (ticker) ticker, price, asset_type
            FROM market_prices ORDER BY ticker, updated_at DESC;"""
@@ -45,7 +67,6 @@ def get_daily_stats() -> dict:
             price = price * usd_rub
         prices[ticker] = price
 
-    # Портфель
     positions = db.fetch_all("SELECT ticker, quantity, avg_price FROM portfolio;")
     assets_value = 0.0
     enriched_positions = []
@@ -64,14 +85,12 @@ def get_daily_stats() -> dict:
             "value": value,
         })
 
-    # Сделки за 24ч
     trades = db.fetch_all(
         """SELECT ticker, action, quantity, price, total, commission
            FROM trades WHERE created_at BETWEEN %s AND %s ORDER BY created_at;""",
         (period_start, period_end),
     )
 
-    # Решения
     decisions = db.fetch_all(
         """SELECT ticker, action, confidence, reasoning
            FROM decisions WHERE created_at BETWEEN %s AND %s ORDER BY created_at;""",
@@ -79,23 +98,11 @@ def get_daily_stats() -> dict:
     )
 
     return {
-        "cash": cash,
-        "initial": initial,
-        "deposits": deposits,
-        "invested_capital": invested_capital,
-        "assets": assets_value,
-        "total": cash + assets_value,
-        "pnl": (cash + assets_value) - invested_capital,
-        "positions": enriched_positions,
-        "trades": trades,
-        "decisions": decisions,
+        "cash": cash, "initial": initial, "deposits": deposits,
+        "invested_capital": invested_capital, "assets": assets_value,
+        "total": cash + assets_value, "pnl": (cash + assets_value) - invested_capital,
+        "positions": enriched_positions, "trades": trades, "decisions": decisions,
     }
-
-
-def _fmt_qty(qty: float) -> str:
-    if qty >= 1:
-        return f"{qty:.2f}"
-    return f"{qty:.8f}".rstrip("0").rstrip(".")
 
 
 def format_report(s: dict) -> str:
@@ -110,9 +117,9 @@ def format_report(s: dict) -> str:
         f"📅 {date.today().strftime('%d.%m.%Y')}",
         "",
         "💰 *КАПИТАЛ*",
-        f"• Свободные деньги: {s['cash']:,.2f} ₽",
-        f"• В активах: {s['assets']:,.2f} ₽",
-        f"• *ИТОГО: {s['total']:,.2f} ₽*",
+        f"• Свободные деньги: {_fmt_money(s['cash'])} ₽",
+        f"• В активах: {_fmt_money(s['assets'])} ₽",
+        f"• *ИТОГО: {_fmt_money(s['total'])} ₽*",
         f"💵 Вложено: {invested_text}",
         f"{pnl_sign} P/L: {s['pnl']:+,.2f} ₽",
         "",
@@ -123,9 +130,9 @@ def format_report(s: dict) -> str:
         for p in s["positions"]:
             lines.append(
                 f"• {p['ticker']}: {_fmt_qty(p['quantity'])} шт. "
-                f"| средняя {p['avg_price']:,.2f} ₽ "
-                f"| текущая {p['current_price']:,.2f} ₽ "
-                f"| стоимость {p['value']:,.2f} ₽"
+                f"| средняя {_fmt_price(p['avg_price'])} ₽ "
+                f"| текущая {_fmt_price(p['current_price'])} ₽ "
+                f"| стоимость {_fmt_money(p['value'])} ₽"
             )
     else:
         lines.append("📊 Портфель пуст")
@@ -136,9 +143,9 @@ def format_report(s: dict) -> str:
         for t in s["trades"]:
             lines.append(
                 f"• {t['action']} {t['ticker']} × {_fmt_qty(float(t['quantity']))} "
-                f"по {float(t['price']):,.2f} ₽ "
-                f"| итого {float(t['total']):,.2f} ₽ "
-                f"| комиссия {float(t['commission']):,.2f} ₽"
+                f"по {_fmt_price(float(t['price']))} ₽ "
+                f"| итого {_fmt_money(float(t['total']))} ₽ "
+                f"| комиссия {float(t['commission']):.2f} ₽"
             )
     else:
         lines.append("💼 Сделок за 24ч не было")
