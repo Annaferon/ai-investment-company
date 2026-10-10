@@ -8,6 +8,22 @@ from src.core.notifier import notify
 from src.agents.trader import Trader
 
 
+def _fmt_price(price: float) -> str:
+    if price >= 1000:
+        return f"{price:,.2f}"
+    if price >= 1:
+        return f"{price:.4f}"
+    if price >= 0.01:
+        return f"{price:.6f}"
+    return f"{price:.10f}"
+
+
+def _fmt_qty(qty: float) -> str:
+    if qty >= 1:
+        return f"{qty:,.2f}"
+    return f"{qty:.8f}".rstrip("0").rstrip(".")
+
+
 def ensure_account() -> None:
     row = db.fetch_one("SELECT id FROM account LIMIT 1;")
     if not row:
@@ -65,8 +81,8 @@ def main() -> int:
         if execution.get("executed"):
             body += (
                 f"\n✅ Исполнено:\n"
-                f"  • Кол-во: {execution.get('quantity')}\n"
-                f"  • Цена: {execution.get('price', 0):,.2f} ₽\n"
+                f"  • Кол-во: {_fmt_qty(execution.get('quantity', 0))}\n"
+                f"  • Цена: {_fmt_price(execution.get('price', 0))} ₽\n"
                 f"  • Сумма: {execution.get('total', 0):,.2f} ₽\n"
                 f"  • Комиссия: {execution.get('commission', 0):,.2f} ₽"
             )
