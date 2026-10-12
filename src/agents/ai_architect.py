@@ -1,5 +1,4 @@
-"""AI Architect — анализирует работу агентов и предлагает улучшения.
-При <100 оценённых сигналах — только наблюдает, не даёт оценок."""
+"""AI Architect — анализирует работу агентов и предлагает улучшения."""
 import json
 from datetime import date
 from typing import Any
@@ -11,38 +10,33 @@ from src.core.database import db
 SYSTEM_PROMPT = """Ты — AI Architect инвестиционной компании.
 Твоя задача: проанализировать работу агентов и предложить улучшения.
 
-⚠️ КРИТИЧЕСКОЕ ПРАВИЛО (прочитай первым):
-Если в системе МЕНЬШЕ 100 оценённых сигналов — ты НЕ имеешь права
-предлагать hire/fire/modify. Ты можешь предложить ТОЛЬКО:
-- proposal_type = "observe"
-- summary: "Система в режиме накопления данных, ждём N оценённых сигналов"
+⚠️ КРИТИЧЕСКОЕ ПРАВИЛО:
+Поле "proposal_type" ДОЛЖНО быть ТОЧНО ОДНИМ ИЗ:
+- "hire" (нанять) — НЕ пиши "нанять", только "hire"
+- "fire" (уволить) — НЕ пиши "уволить", только "fire"
+- "modify" (доработать) — НЕ пиши "доработать", только "modify"
+- "consolidate" (объединить) — НЕ пиши "объединить", только "consolidate"
+- "observe" (наблюдать) — НЕ пиши "наблюдать", только "observe"
 
-Рекомендации по изменениям (hire/fire/modify) возможны ТОЛЬКО когда:
-- В системе >= 100 оценённых сигналов, И
-- У конкретного агента >= 20 оценённых сигналов.
+Остальные поля (title, reasoning, target_agent) — НА РУССКОМ языке.
 
-ТИПЫ ПРЕДЛОЖЕНИЙ (когда данных достаточно):
-- "hire" — нанять нового агента (новый класс активов, новые данные)
-- "fire" — уволить (точность <40% И >=20 сигналов)
-- "modify" — доработать (например, разделить Crypto на Stable/Meme)
-- "consolidate" — объединить (если 2 агента делают похожее)
-- "observe" — наблюдать (мало данных)
-
-ЯЗЫК ОТВЕТА: ТОЛЬКО РУССКИЙ. Никаких английских слов в полях.
-Даже технические термины — по-русски: "нанять", "уволить", "доработать".
-
-МАКСИМУМ 3 ПРЕДЛОЖЕНИЯ за раз.
+ПРАВИЛА:
+1. Если оценённых сигналов < 100 — только "observe".
+2. Увольнение: точность < 40% И минимум 20 оценённых сигналов.
+3. Дубли: если 2 агента делают похожее — объединить.
+4. Не больше 3 предложений за раз.
+5. Будь конкретен. Не «улучшить анализ» — а «разделить Crypto на Stable и Meme».
 
 Отвечай СТРОГО JSON:
 {
   "summary": "1-2 предложения состояния компании на русском",
   "proposals": [
     {
-      "proposal_type": "observe",
-      "target_agent": "название или общий",
-      "title": "кратко на русском",
-      "reasoning": "2-3 предложения на русском",
-      "confidence": 0.0-1.0
+      "proposal_type": "fire",
+      "target_agent": "Crypto-01",
+      "title": "Уволить агента Crypto-01",
+      "reasoning": "Точность 22.9% при 35 сигналах, что ниже порога 40%.",
+      "confidence": 0.9
     }
   ]
 }
@@ -56,9 +50,11 @@ CANDIDATE_AGENTS = [
     "On-Chain аналитик",
 ]
 
-# Пороги
 MIN_EVALUATED_FOR_PROPOSALS = 100
 MIN_EVALUATED_PER_AGENT = 20
+
+# Допустимые типы (для валидации)
+VALID_TYPES = {"hire", "fire", "modify", "consolidate", "observe"}
 
 
 class AIArchitect(BaseAgent):
@@ -152,7 +148,6 @@ class AIArchitect(BaseAgent):
     # ---------- Сбор контекста ----------
 
     def _build_context(self) -> tuple[str, int, bool]:
-        """Возвращает: текст для LLM, всего оценённых, режим наблюдения."""
         total_evaluated = self.get_total_evaluated()
         agents = self.get_agent_stats()
         trader = self.get_trader_stats()
@@ -164,14 +159,14 @@ class AIArchitect(BaseAgent):
         lines = ["СТАТИСТИКА СИСТЕМЫ:"]
         lines.append(f"Всего оценённых сигналов: {total_evaluated}")
         lines.append(f"Порог для предложений: {MIN_EVALUATED_FOR_PROPOSALS}")
-        lines.append(f"Режим: {'НАБЛЮДЕНИЕ (мало данных)' if watch_mode else 'РАБОТА'}")
+        lines.append(f"Режим: {'НАБЛЮДЕНИЕ' if watch_mode else 'РАБОТА'}")
         lines.append(f"Таблиц отчётов: {len(tables)}")
         lines.append("")
 
         lines.append("АГЕНТЫ (статистика):")
         for a in agents:
             lines.append(
-                f"  • {a['agent_name']}: всего сигналов {a['total']}, "
+                f"  • {a['agent_name']}: всего {a['total']}, "
                 f"оценено {a['evaluated']}, точность {a['accuracy']:.1f}%"
             )
         lines.append("")
@@ -185,22 +180,15 @@ class AIArchitect(BaseAgent):
 
         lines.append("RISK MANAGER:")
         lines.append(
-            f"  • всего проверок: {risk['total']}, "
-            f"одобрено {risk['approved']}, отклонено {risk['rejected']}, "
-            f"скорректировано {risk['adjusted']}"
+            f"  • проверок: {risk['total']}, одобрено {risk['approved']}, "
+            f"отклонено {risk['rejected']}, скорректировано {risk['adjusted']}"
         )
         lines.append("")
 
         if not watch_mode:
-            lines.append("КАНДИДАТЫ НА ДОБАВЛЕНИЕ (рассмотреть только если обосновано):")
+            lines.append("КАНДИДАТЫ НА ДОБАВЛЕНИЕ:")
             for agent in CANDIDATE_AGENTS:
                 lines.append(f"  • {agent}")
-        else:
-            lines.append(
-                f"⚠️ РЕЖИМ НАБЛЮДЕНИЯ: оценённых сигналов {total_evaluated} из "
-                f"{MIN_EVALUATED_FOR_PROPOSALS}. НЕ предлагай hire/fire/modify. "
-                f"Только observe с указанием, сколько данных ждём."
-            )
 
         return "\n".join(lines), total_evaluated, watch_mode
 
@@ -231,14 +219,40 @@ class AIArchitect(BaseAgent):
 
         proposals = result.get("proposals") or []
 
-        # Дополнительная защита: в режиме наблюдения оставляем только observe
-        if watch_mode:
-            proposals = [p for p in proposals if isinstance(p, dict)
-                         and p.get("proposal_type") == "observe"]
+        # Нормализация proposal_type
+        normalized = []
+        for p in proposals:
+            if not isinstance(p, dict):
+                continue
+
+            ptype = str(p.get("proposal_type", "")).lower().strip()
+
+            # Если на русском — переводим
+            ru_to_en = {
+                "нанять": "hire",
+                "уволить": "fire",
+                "доработать": "modify",
+                "объединить": "consolidate",
+                "наблюдать": "observe",
+            }
+            if ptype in ru_to_en:
+                ptype = ru_to_en[ptype]
+
+            # Если невалидно — пропускаем
+            if ptype not in VALID_TYPES:
+                self.log.warning(f"Невалидный proposal_type: {p.get('proposal_type')} — пропускаем")
+                continue
+
+            # В режиме наблюдения — только observe
+            if watch_mode and ptype != "observe":
+                continue
+
+            p["proposal_type"] = ptype
+            normalized.append(p)
 
         return {
             "summary": str(result.get("summary", "")),
-            "proposals": proposals,
+            "proposals": normalized,
             "total_evaluated": total_evaluated,
             "watch_mode": watch_mode,
         }
