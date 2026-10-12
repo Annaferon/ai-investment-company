@@ -1,6 +1,7 @@
 """Crypto Analyst — прогноз направления криптовалют на 3-7 дней вперёд.
 Работает 24/7. Монеты без истории не анализируются."""
 import json
+from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -11,6 +12,11 @@ from src.oracle.technical_indicators import analyze_ticker, format_for_llm
 
 SYSTEM_PROMPT = """Ты — прогнозист криптовалютного рынка.
 Твоя задача: ПРЕДСКАЗАТЬ направление цены на ближайшие 3-7 дней.
+
+🔴 ЯЗЫК ОТВЕТА: ТОЛЬКО РУССКИЙ.
+Поля "reasoning" и "summary" — на русском. Никаких английских слов,
+даже технических. "RSI" пиши как "RSI", "MA20" как "MA20",
+но остальное — по-русски.
 
 ⚠️ КРИТИЧНО: sentiment — это ПРОГНОЗ, а не описание текущего момента.
 
@@ -37,12 +43,16 @@ SYSTEM_PROMPT = """Ты — прогнозист криптовалютного 
 2. Если сигнал слабый — снижай confidence, но выбирай направление.
 3. Пиши reasoning как ПРОГНОЗ: «Ожидаю рост на X% за счёт Y».
 
+ПРИМЕР ПРАВИЛЬНОГО REASONING (на русском):
+"Ожидаю рост BTC на 3-5% за 3-7 дней. RSI 45 не перекуплен,
+цена выше MA200 (поддержка), MA20 > MA50 — краткосрочный тренд вверх."
+
 ОТДЕЛЬНО ПРО МЕМКОИНЫ (DOGE, SHIB, PEPE):
 - Очень высокая волатильность
 - Прогнозы могут быть ошибочными → confidence ≤ 0.6
 - Score обычно ≤ 6.0
 
-ФОРМАТ ОТВЕТА — строго JSON (без пояснений):
+ФОРМАТ ОТВЕТА — строго JSON (без пояснений, без markdown):
 [
   {
     "ticker": "BTC",
@@ -50,7 +60,7 @@ SYSTEM_PROMPT = """Ты — прогнозист криптовалютного 
     "score": 0-10,
     "confidence": 0.0-1.0,
     "entry_point": true|false,
-    "reasoning": "прогноз на 3-7 дней, 2-4 предложения с опорой на индикаторы"
+    "reasoning": "прогноз на русском языке, 2-4 предложения"
   }
 ]
 """
@@ -157,12 +167,12 @@ Sentiment: {news['sentiment']}
 ⚠️ ЗАДАЧА: дай ПРОГНОЗ направления цены на 3-7 дней вперёд
 для каждой монеты ({', '.join(tickers)}).
 
-Не описывай текущее состояние — предсказывай БУДУЩЕЕ.
-Используй neutral ТОЛЬКО если уверен, что цена останется ±2%.
-Чаще выбирай bullish или bearish.
-
-entry_point=true — если считаешь, что СЕЙЧАС хорошая точка входа
-(позиция <20% + RSI<40 + другие сигналы разворота)."""
+ВАЖНО:
+- Не описывай текущее состояние — предсказывай БУДУЩЕЕ.
+- Reasoning пиши ТОЛЬКО НА РУССКОМ ЯЗЫКЕ.
+- Используй neutral ТОЛЬКО если уверен, что цена останется ±2%.
+- Чаще выбирай bullish или bearish.
+- entry_point=true — если СЕЙЧАС хорошая точка входа."""
 
         raw = self.think(prompt=prompt, system=SYSTEM_PROMPT)
 
@@ -249,8 +259,6 @@ entry_point=true — если считаешь, что СЕЙЧАС хороша
             top = sorted(reports, key=lambda x: float(x.get("score", 0)), reverse=True)[:3]
             self.log.info(f"Топ-3: {[(r['ticker'], r['score']) for r in top]}")
 
-        # Статистика по sentiment
-        from collections import Counter
         sentiments = Counter(r.get("sentiment") for r in reports)
         self.log.info(f"Sentiment: {dict(sentiments)}")
 
