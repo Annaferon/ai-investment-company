@@ -1,89 +1,74 @@
-"""Crypto Analyst — технический анализ криптовалют. Работает 24/7."""
+"""Crypto Analyst — прогноз направления криптовалют на 3-7 дней вперёд.
+Работает 24/7. Монеты без истории не анализируются."""
 import json
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from src.agents.base import BaseAgent
 from src.core.database import db
-from src.oracle.technical_indicators import analyze_all, format_for_llm
+from src.oracle.technical_indicators import analyze_ticker, format_for_llm
 
 
-SYSTEM_PROMPT = """Ты — профессиональный крипто-трейдер с 10-летним опытом.
-Твоя задача: проанализировать технические данные по монетам и дать оценку.
+SYSTEM_PROMPT = """Ты — прогнозист криптовалютного рынка.
+Твоя задача: ПРЕДСКАЗАТЬ направление цены на ближайшие 3-7 дней.
 
-Тебе даются ГОТОВЫЕ индикаторы (не считай их сам):
-- Цена (current)
-- Диапазон за год (min_year — max_year)
-- Позиция в диапазоне (0% = дно, 100% = пик)
-- RSI (>70 = перекуплен, <30 = перепродан)
-- MA20, MA50, MA200 (скользящие средние)
-- ATR% (волатильность)
-- Изменения за 24ч / 7д / 30д / 365д
+⚠️ КРИТИЧНО: sentiment — это ПРОГНОЗ, а не описание текущего момента.
 
-ПРАВИЛА АНАЛИЗА:
-1. Позиция в диапазоне:
-   - 0-20% → СИЛЬНАЯ зона покупки (дно)
-   - 20-40% → зона покупки
-   - 40-60% → нейтрально
-   - 60-80% → зона продажи
-   - 80-100% → СИЛЬНАЯ зона продажи (пик)
+ПРАВИЛА ВЫБОРА SENTIMENT:
 
-2. RSI:
-   - <30 → перепродан, возможен отскок → покупка
-   - 30-50 → слабость
-   - 50-70 → норма
-   - >70 → перекуплен → продажа или ожидание
+🟢 bullish — ты считаешь, что через 3-7 дней цена БУДЕТ ВЫШЕ текущей на >2%.
+   Признаки: RSI < 40 (перепродан), позиция в диапазоне < 30% (дно),
+   MA20 > MA50 (тренд вверх), цена у MA200 (поддержка).
 
-3. MA-тренды:
-   - Цена > MA200 → долгосрочный бычий тренд
-   - Цена < MA200 → долгосрочный медвежий тренд
-   - MA20 > MA50 → краткосрочный bullish
-   - MA20 < MA50 → краткосрочный bearish
+🔴 bearish — ты считаешь, что через 3-7 дней цена БУДЕТ НИЖЕ текущей на >2%.
+   Признаки: RSI > 70 (перекуплен), позиция > 80% (пик),
+   MA20 < MA50 (тренд вниз), пробой MA200 вниз.
 
-4. Волатильность (ATR%):
-   - >5% → очень рискованно, малый размер позиции
-   - 2-5% → нормально
-   - <2% → стабильно
+⚪ neutral — используй ТОЛЬКО если уверен, что цена будет ±2% от текущей.
+   Признаки: RSI 40-60, позиция 40-60%, тренды противоречат друг другу.
+   ⚠️ Не более 20% сигналов могут быть neutral. Чаще выбирай сторону.
 
-5. Комбинированный сигнал:
-   - Дно + RSI<30 + цена у MA200 → STRONG BUY
-   - Пик + RSI>70 → SELL
-   - Нейтрально → HOLD
+ЛОГИКА ПРОГНОЗА:
+1. Сначала определи — есть ли чёткий сигнал:
+   • Дно (позиция <20%) + RSI<40 → СИЛЬНЫЙ bullish
+   • Пик (позиция >80%) + RSI>70 → СИЛЬНЫЙ bearish
+   • Коррекция в тренде вверх (MA20>MA50, RSI 30-50) → bullish
+   • Отскок в тренде вниз (MA20<MA50, RSI 50-70) → bearish
+2. Если сигнал слабый — снижай confidence, но выбирай направление.
+3. Пиши reasoning как ПРОГНОЗ: «Ожидаю рост на X% за счёт Y».
 
-ОТДЕЛЬНО ПРО МЕМКОИНЫ (DOGE, SHIB, PEPE, WIF, BONK):
-- Очень высокий риск
-- Только малые позиции (макс 1-2% капитала)
-- Жёсткий стоп-лосс
-- Их score не должен превышать 6.0 обычно
+ОТДЕЛЬНО ПРО МЕМКОИНЫ (DOGE, SHIB, PEPE):
+- Очень высокая волатильность
+- Прогнозы могут быть ошибочными → confidence ≤ 0.6
+- Score обычно ≤ 6.0
 
-Отвечай СТРОГО JSON-массивом:
+ФОРМАТ ОТВЕТА — строго JSON (без пояснений):
 [
   {
     "ticker": "BTC",
-    "sentiment": "bullish" | "neutral" | "bearish",
+    "sentiment": "bullish" | "bearish" | "neutral",
     "score": 0-10,
     "confidence": 0.0-1.0,
     "entry_point": true|false,
-    "reasoning": "развёрнутое объяснение на основе индикаторов (3-5 предложений)"
+    "reasoning": "прогноз на 3-7 дней, 2-4 предложения с опорой на индикаторы"
   }
 ]
 """
 
 MAX_DATA_AGE_HOURS = 6
-CRYPTO_TICKERS = ["BTC", "ETH", "SOL", "BNB", "LINK",
-                  "DOGE", "SHIB", "PEPE", "WIF", "BONK"]
+ALL_CRYPTO_TICKERS = ["BTC", "ETH", "SOL", "BNB", "LINK",
+                      "DOGE", "SHIB", "PEPE", "WIF", "BONK"]
 
 
 class CryptoAnalyst(BaseAgent):
-    """Аналитик криптовалют с техническим анализом."""
+    """Аналитик-прогнозист криптовалют."""
 
-    DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+    DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
     def __init__(self, name: str = "Crypto-01") -> None:
         super().__init__(name=name, role="crypto_analyst")
 
     def get_crypto_prices(self) -> dict[str, float]:
-        """Свежие цены крипты в рублях."""
         cutoff = datetime.now() - timedelta(hours=MAX_DATA_AGE_HOURS)
 
         usd_row = db.fetch_one(
@@ -109,6 +94,17 @@ class CryptoAnalyst(BaseAgent):
         self.log.info(f"Крипто-цены (₽): {len(prices)}, курс USD/RUB={usd_rub:.2f}")
         return prices
 
+    def get_tickers_with_history(self, min_points: int = 30) -> list[str]:
+        rows = db.fetch_all(
+            """SELECT ticker, COUNT(*) as cnt
+               FROM price_history
+               WHERE asset_type = 'crypto'
+               GROUP BY ticker
+               HAVING COUNT(*) >= %s;""",
+            (min_points,),
+        )
+        return [r["ticker"] for r in rows]
+
     def get_latest_news(self) -> dict[str, Any] | None:
         return db.fetch_one(
             """SELECT summary, sentiment, key_events, confidence
@@ -116,12 +112,27 @@ class CryptoAnalyst(BaseAgent):
         )
 
     def analyze(self, prices: dict[str, float]) -> list[dict[str, Any]]:
-        """Технический анализ + LLM."""
-        # 1. Считаем технические индикаторы
-        analysis = analyze_all(CRYPTO_TICKERS)
+        tickers_with_history = self.get_tickers_with_history()
+        if not tickers_with_history:
+            self.log.warning("Нет монет с историей")
+            return []
+
+        tickers = [t for t in ALL_CRYPTO_TICKERS if t in tickers_with_history]
+        skipped = [t for t in ALL_CRYPTO_TICKERS if t not in tickers_with_history]
+
+        self.log.info(f"Анализируем: {tickers}")
+        if skipped:
+            self.log.info(f"Пропускаем (нет истории): {skipped}")
+
+        analysis = {}
+        for t in tickers:
+            try:
+                analysis[t] = analyze_ticker(t)
+            except Exception as e:
+                self.log.error(f"Ошибка индикаторов {t}: {e}")
+
         indicators_text = format_for_llm(analysis)
 
-        # 2. Новости
         news = self.get_latest_news()
         if news:
             news_block = f"""НОВОСТНОЙ ФОН:
@@ -130,25 +141,39 @@ Sentiment: {news['sentiment']}
         else:
             news_block = "НОВОСТИ: нет данных."
 
-        # 3. Цены в рублях
-        prices_block = "\n".join(f"  • {k}: {v:,.2f} ₽" for k, v in prices.items())
+        prices_block = "\n".join(
+            f"  • {k}: {prices[k]:,.2f} ₽"
+            for k in tickers if k in prices
+        )
 
         prompt = f"""ТЕКУЩИЕ ЦЕНЫ (₽):
 {prices_block}
 
-ТЕХНИЧЕСКИЙ АНАЛИЗ (годовая история):
+ТЕХНИЧЕСКИЙ АНАЛИЗ (история 720 дней):
 {indicators_text}
 
 {news_block}
 
-Дай оценку каждой монете. Обрати особое внимание на точки входа (entry_point=true,
-если монета в зоне покупки: низкая позиция в диапазоне + RSI<40 + другие сигналы)."""
+⚠️ ЗАДАЧА: дай ПРОГНОЗ направления цены на 3-7 дней вперёд
+для каждой монеты ({', '.join(tickers)}).
+
+Не описывай текущее состояние — предсказывай БУДУЩЕЕ.
+Используй neutral ТОЛЬКО если уверен, что цена останется ±2%.
+Чаще выбирай bullish или bearish.
+
+entry_point=true — если считаешь, что СЕЙЧАС хорошая точка входа
+(позиция <20% + RSI<40 + другие сигналы разворота)."""
 
         raw = self.think(prompt=prompt, system=SYSTEM_PROMPT)
 
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.strip("`").replace("json", "", 1).strip()
+
+        first_bracket = cleaned.find("[")
+        last_bracket = cleaned.rfind("]")
+        if first_bracket != -1 and last_bracket > first_bracket:
+            cleaned = cleaned[first_bracket:last_bracket + 1]
 
         try:
             results = json.loads(cleaned)
@@ -158,6 +183,17 @@ Sentiment: {news['sentiment']}
 
         if not isinstance(results, list):
             raise ValueError("LLM вернула не массив")
+
+        results = [r for r in results if isinstance(r, dict) and r.get("ticker") in tickers]
+
+        # Считаем neutral — не больше 20%
+        total = len(results)
+        neutral = sum(1 for r in results if r.get("sentiment") == "neutral")
+        if total > 0 and neutral / total > 0.2:
+            self.log.warning(
+                f"Слишком много neutral: {neutral}/{total} "
+                f"({neutral/total*100:.0f}%). Норма ≤20%."
+            )
 
         return results
 
@@ -192,18 +228,19 @@ Sentiment: {news['sentiment']}
             self.log.warning("Нет свежих крипто-цен")
             return {"error": "no_prices"}
 
-        self.log.info(f"Анализируем {len(prices)} монет")
-
         try:
             reports = self.analyze(prices)
         except Exception as e:
             self.log.error(f"Ошибка анализа: {e}")
             return {"error": str(e)}
 
+        if not reports:
+            self.log.warning("Нет монет для анализа")
+            return {"error": "no_tickers_with_history"}
+
         saved = self.save_reports(reports)
         self.log.info(f"Сохранено {saved} отчётов")
 
-        # Ищем точки входа
         entries = [r for r in reports if r.get("entry_point")]
         if entries:
             self.log.info(f"🎯 ТОЧКИ ВХОДА: {[r['ticker'] for r in entries]}")
@@ -212,8 +249,14 @@ Sentiment: {news['sentiment']}
             top = sorted(reports, key=lambda x: float(x.get("score", 0)), reverse=True)[:3]
             self.log.info(f"Топ-3: {[(r['ticker'], r['score']) for r in top]}")
 
+        # Статистика по sentiment
+        from collections import Counter
+        sentiments = Counter(r.get("sentiment") for r in reports)
+        self.log.info(f"Sentiment: {dict(sentiments)}")
+
         return {
             "saved": saved,
-            "tickers": list(prices.keys()),
+            "tickers": [r["ticker"] for r in reports],
             "entries": [r["ticker"] for r in entries],
+            "sentiments": dict(sentiments),
         }
