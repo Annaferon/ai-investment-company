@@ -34,28 +34,37 @@ def main() -> int:
         summary = result.get("summary", "")
         proposals = result.get("proposals") or []
         total_evaluated = result.get("total_evaluated", 0)
+        watch_mode = result.get("watch_mode", True)
+
+        mode_text = "🔍 НАБЛЮДЕНИЕ" if watch_mode else "⚙️ РАБОЧИЙ РЕЖИМ"
 
         body = (
-            f"📊 Оценённых сигналов в системе: {total_evaluated}\n\n"
+            f"{mode_text}\n\n"
+            f"📊 Оценённых сигналов: {total_evaluated}\n\n"
             f"📌 {summary}\n"
         )
 
         if proposals:
-            body += f"\n💡 Предложения ({len(proposals)}):\n"
-            for p in proposals[:5]:
+            body += f"\n\n💡 *Предложения ({len(proposals)}):*"
+            for i, p in enumerate(proposals, 1):
                 if not isinstance(p, dict):
                     continue
                 emoji = {
                     "hire": "🟢", "fire": "🔴", "modify": "🟡",
                     "consolidate": "🔵", "observe": "⚪",
                 }.get(p.get("proposal_type"), "⚪")
-                body += (
-                    f"\n{emoji} [{p.get('proposal_type', '?')}] "
-                    f"{p.get('title', '?')}\n"
-                    f"   {p.get('reasoning', '')[:250]}\n"
-                )
+                title = p.get("title", "?")
+                target = p.get("target_agent", "")
+                reasoning = p.get("reasoning", "")
+                confidence = p.get("confidence", 0)
+
+                body += f"\n\n{i}. {emoji} *[{p.get('proposal_type', '?')}]* {title}"
+                if target:
+                    body += f"\n   Цель: {target}"
+                body += f"\n   {reasoning}"
+                body += f"\n   Уверенность: {confidence}"
         else:
-            body += "\n(пока нет предложений)"
+            body += "\n\n(пока нет предложений)"
 
         notify("🧠 ARCHITECT", body)
 
